@@ -92,6 +92,8 @@ Use **New session** to enter a directory directly. Use the official TUI to choos
 a model, sign in or answer permission prompts. Enter text directly in the terminal
 you want to control. Use **Shift+Enter** to insert a line break in the CLI prompt.
 
+Drag a registered project in the left list to change its position, or open its **⋯** menu and use **Move up / Move down**. The saved order is shared by the project list, tabs and destination picker and survives app restarts. Favorites remain grouped at the top; projects move within their own group. Reordering changes only the list, and a failed save leaves the displayed order unchanged.
+
 ## Restarting and restoring sessions
 
 After a complete exit, the app restores the workspace that was open at shutdown.

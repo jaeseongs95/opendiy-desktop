@@ -71,6 +71,9 @@ const cancelledRestores = new Set<SavedSession>();
 let saveTimer: ReturnType<typeof setTimeout>;
 let saveQueue = Promise.resolve();
 let dragging = '';
+let draggingProject = '';
+let rejectedProjectDrop = '';
+let projectDragClickUntil = 0;
 let searchVisible = false;
 let pendingStarts = 0;
 const pendingThreads = new Map<string, Promise<SessionInfo>>();
@@ -722,6 +725,8 @@ function renderCounts() {
 }
 
 function renderSide() {
+  const projectList = $('#projects'); const projectScroll = projectList.scrollTop;
+  const focusedProject = projectList.contains(document.activeElement) ? (document.activeElement as HTMLElement).dataset.projectKey : undefined;
   const projects = projectGroups(importedProjects, [...sessions.values()]);
   if (selectedProject === 'unassigned' && !projects.some(project => project.key === 'unassigned')) projects.push({ key: 'unassigned', name: '', cwd: null, count: 0, favorite: false });
   $('#project-count').textContent = String(importedProjects.length);
@@ -732,10 +737,36 @@ function renderSide() {
     const row = document.createElement('button'); row.className = `project-row${selectedProject === key ? ' active' : ''}`; row.setAttribute('aria-pressed', String(selectedProject === key));
     const label = document.createElement('span'); if (key === 'unassigned') bindText(label, '미분류', 'Unassigned'); else label.textContent = name;
     row.title = cwd ?? t('실행 폴더 없음', 'No working folder'); row.dataset.projectCwd = cwd ?? ''; row.dataset.projectKey = key;
-    const total = document.createElement('small'); total.textContent = String(count); row.append(document.createTextNode(project.favorite ? '★ ' : '▱ '), label, total); row.onclick = () => selectProject(key); container.append(row);
+    const total = document.createElement('small'); total.textContent = String(count); row.append(document.createTextNode(project.favorite ? '★ ' : '▱ '), label, total); row.onclick = () => { if (performance.now() >= projectDragClickUntil) selectProject(key); }; container.append(row);
+    if (project.id && native) {
+      row.draggable = !exitInProgress;
+      bindAttribute(row, 'aria-description', '드래그로 같은 그룹 안에서 프로젝트 순서 변경. 더보기 메뉴에서도 위아래로 이동할 수 있습니다.', 'Drag to reorder projects within the same group. The menu also has Move up and Move down.');
+      row.ondragstart = event => { if (exitInProgress || projectManager.reordering) { event.preventDefault(); return; } draggingProject = project.id!; rejectedProjectDrop = ''; projectDragClickUntil = performance.now() + 1000; event.dataTransfer!.effectAllowed = 'move'; event.dataTransfer!.setData('application/x-opendiy-project', project.id!); container.classList.add('dragging'); };
+      row.ondragend = () => { draggingProject = ''; projectDragClickUntil = performance.now() + 250; container.classList.remove('dragging'); for (const item of projectList.children) item.classList.remove('project-drop-before', 'project-drop-after'); };
+      container.ondragover = event => {
+        const source = importedProjects.find(item => item.id === draggingProject);
+        if (!source || draggingProject === project.id || exitInProgress || projectManager.reordering) return;
+        event.preventDefault();
+        const allowed = !!source.favorite === !!project.favorite; event.dataTransfer!.dropEffect = allowed ? 'move' : 'none';
+        if (!allowed && rejectedProjectDrop !== project.id) { rejectedProjectDrop = project.id!; notify('즐겨찾기는 상단에 고정됩니다. 같은 그룹 안에서 이동하세요.', true, 'Favorites stay at the top. Move within the same group.'); }
+        const after = event.clientY >= container.getBoundingClientRect().top + container.getBoundingClientRect().height / 2;
+        container.classList.toggle('project-drop-before', allowed && !after); container.classList.toggle('project-drop-after', allowed && after);
+      };
+      container.ondragleave = () => container.classList.remove('project-drop-before', 'project-drop-after');
+      container.ondrop = event => {
+        if (!draggingProject || exitInProgress || projectManager.reordering) return;
+        event.preventDefault(); const id = draggingProject; draggingProject = ''; projectDragClickUntil = performance.now() + 250;
+        container.classList.remove('project-drop-before', 'project-drop-after');
+        if (event.dataTransfer?.getData('application/x-opendiy-project') !== id) return;
+        const after = event.clientY >= container.getBoundingClientRect().top + container.getBoundingClientRect().height / 2;
+        void projectManager.reorder(id, project.id!, after);
+      };
+    }
     if (project.id) { const manage = document.createElement('button'); manage.className = 'project-manage icon-button'; manage.dataset.projectId = project.id; manage.textContent = '⋯'; bindAttribute(manage, 'aria-label', `${name} 프로젝트 관리`, `Manage project ${name}`); manage.onclick = () => projectManager.open(importedProjects.find(item => item.id === project.id)!); row.oncontextmenu = event => { event.preventDefault(); manage.click(); }; container.append(manage); }
     $('#projects').append(container);
   }
+  projectList.scrollTop = projectScroll;
+  if (focusedProject) [...projectList.querySelectorAll<HTMLElement>('[data-project-key]')].find(row => row.dataset.projectKey === focusedProject)?.focus({ preventScroll: true });
   if (!projects.length) { const p = document.createElement('p'); p.className = 'side-empty'; bindText(p, '프로젝트를 만들거나 폴더를 가져오세요', 'Create a project or import a folder'); $('#projects').append(p); }
   const activeProjects = new Set([...sessions.values()].filter(session => session.active).map(session => sessionProjectKey(session, importedProjects)));
   const tabs = $('#project-tabs'); const focused = tabs.contains(document.activeElement) ? (document.activeElement as HTMLElement).dataset.projectKey : undefined; tabs.replaceChildren();
@@ -851,7 +882,7 @@ const sessionBrowser = createSessionBrowser({
 const cronManager = createCronManager({ call, notify });
 const subagentManager = createSubagentManager({ call, notify });
 const projectManager = createProjectManager({
-  call, projects: () => importedProjects,
+  call, projects: () => importedProjects, notify,
   async changed(project, deletedId) {
     if (deletedId) {
       const belongs = (session: SavedSession) => session.projectId === deletedId || (!session.projectAssigned && sessionProjectKey(session, importedProjects) === `id:${deletedId}`);

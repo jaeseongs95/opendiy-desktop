@@ -579,6 +579,12 @@ impl Engine {
         store.set_project_favorite(id, favorite)
     }
 
+    pub fn reorder_project(&self, id: &str, target_id: &str, after: bool) -> Result<Vec<crate::project::ProjectInfo>, String> {
+        let store = self.inner.store.lock().map_err(|_| "metadata store lock poisoned")?;
+        self.check_project_admission()?;
+        store.reorder_project(id, target_id, after)
+    }
+
     pub fn move_session_to_project(&self, id: &str, generation: u64, project_id: Option<&str>) -> Result<SessionInfo, String> {
         let sessions = self.inner.sessions.lock().map_err(|_| "session registry lock poisoned")?;
         self.check_project_admission()?;

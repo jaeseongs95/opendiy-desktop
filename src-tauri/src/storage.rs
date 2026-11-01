@@ -272,12 +272,46 @@ impl Store {
         Ok(())
     }
 
-    pub fn projects(&self) -> Result<Vec<ProjectInfo>, String> {
-        let mut statement = self.connection.prepare("SELECT id,name,cwd,created_at,favorite FROM projects ORDER BY favorite DESC,created_at DESC,id")
+    pub fn projects(&self) -> Result<Vec<ProjectInfo>, String> { Self::projects_in(&self.connection) }
+
+    fn projects_in(connection: &Connection) -> Result<Vec<ProjectInfo>, String> {
+        let mut statement = connection.prepare("SELECT id,name,cwd,created_at,favorite FROM projects ORDER BY favorite DESC,created_at DESC,id LIMIT ?1")
             .map_err(|e| format!("List imported projects: {e}"))?;
-        let rows = statement.query_map([], project_row)
-            .map_err(|e| format!("Query imported projects: {e}"))?;
-        rows.collect::<Result<Vec<_>, _>>().map_err(|e| format!("Read imported project row: {e}"))
+        let rows = statement.query_map([crate::project::MAX_PROJECTS as i64 + 1], project_row).map_err(|e| format!("Query imported projects: {e}"))?;
+        let mut projects = rows.collect::<Result<Vec<_>, _>>().map_err(|e| format!("Read imported project row: {e}"))?;
+        if projects.len() > crate::project::MAX_PROJECTS { return Err("Stored project count exceeds 250".into()); }
+        let order: Option<String> = connection.query_row("SELECT value FROM app_settings WHERE key='project_order'", [], |row| row.get(0))
+            .optional().map_err(|e| format!("Read project order: {e}"))?;
+        if let Some(order) = order {
+            if order.len() > 32768 { return Err("Stored project order exceeds its size limit".into()); }
+            let ids: Vec<String> = serde_json::from_str(&order).map_err(|e| format!("Read stored project order: {e}"))?;
+            if ids.len() > crate::project::MAX_PROJECTS || ids.iter().any(|id| id.is_empty() || id.len() > 128) { return Err("Stored project order is invalid".into()); }
+            let ranks: std::collections::BTreeMap<_, _> = ids.iter().enumerate().map(|(rank, id)| (id.as_str(), rank)).collect();
+            if ranks.len() != ids.len() { return Err("Stored project order contains duplicate identifiers".into()); }
+            // Stable sorting preserves the existing order for newly registered IDs.
+            projects.sort_by_key(|project| (!project.favorite, ranks.get(project.id.as_str()).copied().unwrap_or(usize::MAX)));
+        }
+        Ok(projects)
+    }
+
+    pub fn reorder_project(&self, id: &str, target_id: &str, after: bool) -> Result<Vec<ProjectInfo>, String> {
+        for value in [id, target_id] {
+            if value.is_empty() || value.len() > 128 || value.chars().any(char::is_control) { return Err("Invalid project order identifier".into()); }
+        }
+        let transaction = self.project_transaction()?;
+        let mut projects = Self::projects_in(&transaction)?;
+        let from = projects.iter().position(|project| project.id == id).ok_or("Project not found")?;
+        let target = projects.iter().position(|project| project.id == target_id).ok_or("Project order destination not found")?;
+        if projects[from].favorite != projects[target].favorite { return Err("Projects can only move within the same favorite group".into()); }
+        if from == target { return Ok(projects); }
+        let moved = projects.remove(from);
+        let target = projects.iter().position(|project| project.id == target_id).expect("distinct destination remains present");
+        projects.insert(target + usize::from(after), moved);
+        let order = serde_json::to_string(&projects.iter().map(|project| &project.id).collect::<Vec<_>>()).map_err(|e| format!("Encode project order: {e}"))?;
+        transaction.execute("INSERT INTO app_settings(key,value) VALUES('project_order',?1) ON CONFLICT(key) DO UPDATE SET value=excluded.value", [order])
+            .map_err(|e| format!("Save project order: {e}"))?;
+        transaction.commit().map_err(|e| format!("Commit project order: {e}"))?;
+        Ok(projects)
     }
 }
 
@@ -291,6 +325,74 @@ mod tests {
 
     fn project_session(id: &str, project_id: Option<String>) -> SessionInfo {
         SessionInfo { id: id.into(), generation: 1, title: "보존할 대화 제목".into(), cwd: "C:\\workspace".into(), project_assigned: project_id.is_some(), project_id, project_revision: 0, thread_id: Some("keep-thread".into()), state: "running".into(), active: true }
+    }
+
+    fn project_names(store: &Store) -> Vec<String> { store.projects().unwrap().into_iter().map(|project| project.name).collect() }
+
+    #[test]
+    fn project_order_persists_and_keeps_favorites_new_projects_and_other_metadata() {
+        let root = std::env::temp_dir().join(format!("opendiy-project-order-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&root).unwrap(); let database = root.join("metadata.sqlite3");
+        {
+            let store = Store::open(&database).unwrap();
+            let a = store.create_project("A", None).unwrap(); let b = store.create_project("B", None).unwrap(); let c = store.create_project("C", None).unwrap();
+            store.connection.execute("UPDATE projects SET created_at=CASE name WHEN 'A' THEN 1 WHEN 'B' THEN 2 ELSE 3 END", []).unwrap();
+            let session = project_session("kept-session", Some(a.id.clone())); store.save_session(&session).unwrap();
+            let layout = serde_json::json!({"version":1,"sessions":[{"title":"kept-draft-metadata","projectId":a.id}]}); store.save_layout(&layout).unwrap();
+            let original: String = store.connection.query_row("SELECT metadata FROM session_metadata WHERE id='kept-session'", [], |row| row.get(0)).unwrap();
+            assert_eq!(project_names(&store), ["C", "B", "A"]);
+            store.reorder_project(&a.id, &c.id, false).unwrap(); assert_eq!(project_names(&store), ["A", "C", "B"]);
+            store.set_project_favorite(&b.id, true).unwrap(); assert_eq!(project_names(&store), ["B", "A", "C"]);
+            store.reorder_project(&a.id, &c.id, true).unwrap(); assert_eq!(project_names(&store), ["B", "C", "A"]);
+            assert!(store.reorder_project(&b.id, &c.id, true).is_err()); assert_eq!(project_names(&store), ["B", "C", "A"]);
+            let d = store.create_project("D", None).unwrap(); assert_eq!(project_names(&store), ["B", "C", "A", "D"]);
+            store.delete_project(&c.id).unwrap(); store.reorder_project(&d.id, &a.id, false).unwrap();
+            assert_eq!(project_names(&store), ["B", "D", "A"]);
+            assert_eq!(store.load_layout().unwrap(), layout);
+            let kept: String = store.connection.query_row("SELECT metadata FROM session_metadata WHERE id='kept-session'", [], |row| row.get(0)).unwrap(); assert_eq!(kept, original);
+        }
+        { let reopened = Store::open(&database).unwrap(); assert_eq!(project_names(&reopened), ["B", "D", "A"]); }
+        for name in ["metadata.sqlite3", "metadata.sqlite3-wal", "metadata.sqlite3-shm"] { let path = root.join(name); if path.exists() { std::fs::remove_file(path).unwrap(); } }
+        std::fs::remove_dir(root).unwrap();
+    }
+
+    #[test]
+    fn project_relative_moves_use_current_membership_and_failed_writes_leave_order_unchanged() {
+        let root = std::env::temp_dir().join(format!("opendiy-project-order-race-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&root).unwrap(); let database = root.join("metadata.sqlite3");
+        {
+            let first = Store::open(&database).unwrap(); let other = Store::open(&database).unwrap();
+            let a = first.create_project("A", None).unwrap(); let b = first.create_project("B", None).unwrap(); let c = first.create_project("C", None).unwrap();
+            first.reorder_project(&a.id, &b.id, false).unwrap();
+            let _stale_snapshot = first.projects().unwrap();
+            other.delete_project(&b.id).unwrap(); let d = other.create_project("D", None).unwrap();
+            let unchanged = project_names(&first);
+            assert!(first.reorder_project(&a.id, &b.id, false).is_err()); assert_eq!(project_names(&first), unchanged);
+            first.reorder_project(&d.id, &a.id, false).unwrap();
+            assert_eq!(first.projects().unwrap().len(), 3); assert!(!first.projects().unwrap().iter().any(|item| item.id == b.id));
+            let held = other.project_transaction().unwrap();
+            first.connection.busy_timeout(Duration::ZERO).unwrap();
+            assert!(first.reorder_project(&a.id, &c.id, true).unwrap_err().contains("Begin project metadata update"));
+            held.rollback().unwrap(); first.connection.busy_timeout(Duration::from_secs(5)).unwrap();
+            let unchanged = project_names(&first);
+            first.connection.execute_batch("CREATE TRIGGER reject_project_order BEFORE INSERT ON app_settings WHEN NEW.key='project_order' BEGIN SELECT RAISE(ABORT,'injected order failure'); END;").unwrap();
+            assert!(first.reorder_project(&a.id, &c.id, true).unwrap_err().contains("Save project order")); assert_eq!(project_names(&first), unchanged);
+            first.connection.execute_batch("DROP TRIGGER reject_project_order").unwrap();
+            assert!(first.reorder_project(&"x".repeat(129), &c.id, true).is_err());
+            assert!(first.reorder_project("missing", &c.id, false).is_err());
+        }
+        for name in ["metadata.sqlite3", "metadata.sqlite3-wal", "metadata.sqlite3-shm"] { let path = root.join(name); if path.exists() { std::fs::remove_file(path).unwrap(); } }
+        std::fs::remove_dir(root).unwrap();
+    }
+
+    #[test]
+    fn invalid_stored_project_orders_fail_without_replacing_the_setting() {
+        let store = Store::open(Path::new(":memory:")).unwrap(); let a = store.create_project("A", None).unwrap(); let b = store.create_project("B", None).unwrap();
+        for bad in ["not-json".to_owned(), serde_json::json!([a.id,a.id]).to_string(), serde_json::to_string(&vec!["unknown";251]).unwrap(), " ".repeat(32769)] {
+            store.connection.execute("INSERT INTO app_settings(key,value) VALUES('project_order',?1) ON CONFLICT(key) DO UPDATE SET value=excluded.value", [&bad]).unwrap();
+            assert!(store.projects().is_err()); assert!(store.reorder_project(&a.id, &b.id, false).is_err());
+            let kept: String = store.connection.query_row("SELECT value FROM app_settings WHERE key='project_order'", [], |row| row.get(0)).unwrap(); assert_eq!(kept,bad);
+        }
     }
 
     #[test]

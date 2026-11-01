@@ -37,3 +37,11 @@
 @media(max-height:620px){.sidebar>.brand{height:58px}.sidebar-lists{margin-top:8px;gap:4px}.sidebar #weekly-usage{padding:8px;font-size:10px}}
 
 .session-id-copy svg,.session-restart svg{width:17px;height:17px;fill:none;stroke:currentColor;stroke-width:1.6}
+
+.project-item.project-drop-before{box-shadow:inset 0 2px var(--accent,#b9a2d9)}
+.project-item.project-drop-after{box-shadow:inset 0 -2px var(--accent,#b9a2d9)}
+.project-item.dragging{opacity:.55}
+#project-order-actions p{flex-basis:100%;margin:4px 0;font-size:11px}
+
+#project-order-actions{flex-wrap:wrap}
+.project-row[draggable=true]{cursor:grab}

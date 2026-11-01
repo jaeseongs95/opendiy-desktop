@@ -6,6 +6,7 @@ interface ProjectHost {
   projects(): ProjectInfo[];
   changed(project?: ProjectInfo, deletedId?: string): Promise<void>;
   moved(session: SessionInfo): void;
+  notify?(message: string, error?: boolean, english?: string): void;
 }
 
 // 팝업은 한 번 만들고 재사용한다. 사용자 이름과 경로는 텍스트로만 삽입한다.
@@ -34,6 +35,10 @@ export function createProjectManager(host: ProjectHost) {
   const clear = button(folderActions, 'project-folder-clear', '폴더 없이 만들기', 'Use no folder', () => { folder.value = ''; });
   const favoriteLabel = element('label', fields); favoriteLabel.className = 'project-favorite-label';
   const favorite = element('input', favoriteLabel, 'project-favorite'); favorite.type = 'checkbox'; const favoriteText = element('span', favoriteLabel); bindText(favoriteText, '즐겨찾기', 'Favorite');
+  const orderActions = element('div', fields, 'project-order-actions'); orderActions.className = 'project-folder-actions';
+  const orderUp = button(orderActions, 'project-order-up', '위로 이동', 'Move up', () => void moveOrder(-1));
+  const orderDown = button(orderActions, 'project-order-down', '아래로 이동', 'Move down', () => void moveOrder(1));
+  const orderHint = element('p', orderActions); bindText(orderHint, '즐겨찾기는 상단에 고정됩니다. 같은 그룹 안에서 순서를 바꿉니다.', 'Favorites stay at the top. Reorder within the same group.');
   const description = element('p', fields); bindText(description, '프로젝트는 세션 묶음입니다. 세션을 이동해도 실행 중인 터미널과 실제 실행 폴더는 바뀌지 않습니다.', 'Projects group sessions. Moving a session keeps its running terminal and actual working folder.');
   const error = element('div', form, 'project-error'); error.className = 'inline-error'; error.setAttribute('role', 'alert'); error.hidden = true;
   const actions = element('div', form); actions.className = 'dialog-actions';
@@ -49,7 +54,30 @@ export function createProjectManager(host: ProjectHost) {
     busy = value; fields.disabled = value;
     for (const node of dialog.querySelectorAll<HTMLButtonElement>('button')) node.disabled = value;
     for (const node of deletion.dialog.querySelectorAll<HTMLButtonElement>('button')) node.disabled = value;
+    updateOrderButtons();
   }
+  function orderNeighbor(offset: number) {
+    if (!current) return;
+    const values = host.projects(); const index = values.findIndex(project => project.id === current!.id);
+    if (index < 0) return;
+    const target = values[index + offset];
+    return target && !!target.favorite === !!values[index].favorite ? target : undefined;
+  }
+  function updateOrderButtons() {
+    orderActions.hidden = !current;
+    orderUp.disabled = busy || !orderNeighbor(-1); orderDown.disabled = busy || !orderNeighbor(1);
+  }
+  async function reorder(id: string, targetId: string, after: boolean) {
+    if (busy) return;
+    const values = host.projects(); const project = values.find(item => item.id === id); const target = values.find(item => item.id === targetId);
+    if (!project || !target || id === targetId) return;
+    if (!!project.favorite !== !!target.favorite) { host.notify?.('즐겨찾기는 상단에 고정됩니다. 같은 그룹 안에서 이동하세요.', true, 'Favorites stay at the top. Move within the same group.'); return; }
+    setBusy(true); error.hidden = true;
+    try { await host.call('reorder_project', { id, targetId, after }); await host.changed(); }
+    catch { bindText(error, '프로젝트 순서를 저장하지 못했습니다. 다시 시도하세요.', 'Could not save the project order. Try again.'); if (dialog.open) error.hidden = false; else host.notify?.('프로젝트 순서를 저장하지 못했습니다. 다시 시도하세요.', true, 'Could not save the project order. Try again.'); }
+    finally { setBusy(false); }
+  }
+  async function moveOrder(offset: number) { const target = orderNeighbor(offset); if (current && target) await reorder(current.id, target.id, offset > 0); }
   async function work(action: () => Promise<void>) {
     if (busy) return; setBusy(true); error.hidden = true;
     try { await action(); }
@@ -97,8 +125,11 @@ export function createProjectManager(host: ProjectHost) {
   }); moveSubmit.className = 'primary-button';
   moving.dialog.addEventListener('cancel', event => { if (movingBusy) event.preventDefault(); });
   return {
+    reorder,
+    get reordering() { return busy; },
     open(project?: ProjectInfo) {
       if (dialog.open || busy) return; current = project; name.value = project?.name ?? ''; folder.value = project?.cwd ?? ''; favorite.checked = !!project?.favorite; choose.hidden = clear.hidden = !!project; remove.hidden = !project; error.hidden = true; name.setCustomValidity('');
+      updateOrderButtons();
       bindText(title, project ? '프로젝트 관리' : '새 프로젝트', project ? 'Manage project' : 'New project'); dialog.showModal(); name.focus();
     },
     move(session: SessionInfo) {

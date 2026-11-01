@@ -67,6 +67,14 @@ async function workspace(page: Page, options: { capacity?: boolean } = {}) {
         if (command === 'choose_project_folder') return state.tabsFixture.chosenFolder ?? null;
         if (command === 'create_project') { const project = { id: 'project-' + projectList().length, name: args.name, cwd: args.cwd, createdAt: 1700000000, favorite: false }; saveProjects([...projectList(), project]); return project; }
         if (command === 'rename_project' || command === 'set_project_favorite') { if (command === 'set_project_favorite' && state.tabsFixture.failFavoriteOnce) { state.tabsFixture.failFavoriteOnce = false; throw new Error('즐겨찾기 저장 실패'); } const values = projectList(); const item = values.find((project: any) => project.id === args.id); if (!item) throw new Error('Project not found'); if (command === 'rename_project') item.name = args.name; else item.favorite = args.favorite; saveProjects(values); return item; }
+        if (command === 'reorder_project') {
+          if (state.tabsFixture.failReorder) throw new Error('PRIVATE_ORDER_SAVE_ERROR');
+          if (state.tabsFixture.holdReorder) await new Promise<void>(resolve => { state.tabsFixture.releaseReorder = resolve; });
+          const values = projectList(); const from = values.findIndex((item: any) => item.id === args.id); const target = values.find((item: any) => item.id === args.targetId);
+          if (from < 0 || !target || !!values[from].favorite !== !!target.favorite) throw new Error('Invalid reorder');
+          const [moved] = values.splice(from, 1); const index = values.findIndex((item: any) => item.id === args.targetId); values.splice(index + Number(args.after), 0, moved);
+          saveProjects(values); return values;
+        }
         if (command === 'delete_project') {
           saveProjects(projectList().filter((project: any) => project.id !== args.id));
           for (const session of existing) if (session.projectId === args.id || (args.id === 'alpha' && ['a1', 'a2'].includes(session.id) && !session.projectAssigned)) { session.projectId = null; session.projectAssigned = true; session.projectRevision = (session.projectRevision ?? 0) + 1; }
@@ -631,4 +639,56 @@ test('Windows 창은 내부 드래그를 허용하고 점 손잡이 이동이 �
   expect(await page.evaluate(() => (window as any).tabsFixture.calls.filter((call: any) => ['start_session', 'session_stop', 'session_write'].includes(call.command)))).toEqual([]);
   const config = JSON.parse(await readFile(new URL('../src-tauri/tauri.conf.json', import.meta.url), 'utf8'));
   expect(config.app.windows.find((window: any) => window.label === 'main').dragDropEnabled, 'Windows에서는 기본 파일 드래그 처리가 화면 내부 드래그를 가로채면 안 됩니다.').toBe(false);
+});
+
+
+const registeredProjectIds = (page: Page) => page.locator('#projects .project-row[data-project-key^="id:"]').evaluateAll(rows => rows.map(row => (row as HTMLElement).dataset.projectKey!.slice(3)));
+
+test('project drag reorders the sidebar and tabs, persists across reload and preserves selected session ownership', async ({ page }) => {
+  await workspace(page); await tab(page, 'Alpha').click();
+  const originalCards = await visibleIds(page);
+  await page.locator('#projects [data-project-key="id:empty"]').dragTo(page.locator('#projects [data-project-key="id:alpha"]'), { targetPosition: { x: 30, y: 3 } });
+  await expect.poll(() => registeredProjectIds(page)).toEqual(['empty', 'alpha', 'beta']);
+  await expect(tab(page, 'Alpha')).toHaveAttribute('aria-selected', 'true'); expect(await visibleIds(page)).toEqual(originalCards);
+  expect(await page.locator('#project-tabs [role=tab]').evaluateAll(rows => rows.filter(row => (row as HTMLElement).dataset.projectKey?.startsWith('id:')).map(row => (row as HTMLElement).dataset.projectKey))).toEqual(['id:empty', 'id:alpha', 'id:beta']);
+  expect(await page.evaluate(() => (window as any).tabsFixture.calls.filter((call: any) => ['start_session','session_stop','move_session_to_project'].includes(call.command)))).toEqual([]);
+  await page.reload(); await expect(page.locator('#app')).toHaveAttribute('aria-busy', 'false');
+  expect(await registeredProjectIds(page)).toEqual(['empty', 'alpha', 'beta']);
+  await page.locator('#project-import').focus();
+  await page.locator('#projects [data-project-key="id:beta"]').dragTo(page.locator('#projects [data-project-key="id:empty"]'), { targetPosition: { x: 30, y: 3 } });
+  await expect.poll(() => registeredProjectIds(page)).toEqual(['beta', 'empty', 'alpha']);
+});
+
+test('project order buttons stay in the favorite group, preserve unsaved names and use keyboard activation', async ({ page }) => {
+  await workspace(page); await tab(page, 'Beta').click();
+  await page.locator('.project-manage[data-project-id="alpha"]').click();
+  await expect(page.locator('#project-order-up')).toBeDisabled(); await expect(page.locator('#project-order-down')).toBeEnabled();
+  await page.locator('#project-name').fill('작성 중 이름');
+  await page.locator('#project-order-down').focus(); await page.keyboard.press('Enter');
+  await expect.poll(() => registeredProjectIds(page)).toEqual(['beta', 'alpha', 'empty']);
+  await expect(page.locator('#project-name')).toHaveValue('작성 중 이름'); await expect(tab(page, 'Beta')).toHaveAttribute('aria-selected', 'true');
+  await page.locator('#project-dialog-close').click();
+  await page.evaluate(() => { const values = JSON.parse(localStorage.getItem('tabs-projects')!); values.find((item: any) => item.id === 'beta').favorite = true; localStorage.setItem('tabs-projects', JSON.stringify(values)); });
+  await page.reload(); await expect(page.locator('#app')).toHaveAttribute('aria-busy', 'false');
+  await page.locator('.project-manage[data-project-id="alpha"]').click(); await expect(page.locator('#project-order-up')).toBeDisabled();
+  await page.locator('#project-dialog-close').click();
+  await page.locator('#projects [data-project-key="id:alpha"]').dragTo(page.locator('#projects [data-project-key="id:beta"]'), { targetPosition: { x: 30, y: 3 } });
+  await expect(page.locator('.toast').last()).toContainText('즐겨찾기는 상단에 고정');
+  expect(await registeredProjectIds(page)).toEqual(['beta', 'alpha', 'empty']);
+});
+
+test('failed or pending project order save leaves list, selected project and session identity intact', async ({ page }) => {
+  await workspace(page); await tab(page, 'Alpha').click(); const originalCards = await visibleIds(page);
+  await page.evaluate(() => { (window as any).tabsFixture.failReorder = true; });
+  await page.locator('.project-manage[data-project-id="alpha"]').click(); await page.locator('#project-order-down').click();
+  await expect(page.locator('#project-error')).toContainText('프로젝트 순서를 저장하지 못했습니다');
+  await expect(page.locator('#project-error')).not.toContainText('PRIVATE_ORDER_SAVE_ERROR');
+  expect(await registeredProjectIds(page)).toEqual(['alpha','beta','empty']); expect(await visibleIds(page)).toEqual(originalCards); await expect(tab(page, 'Alpha')).toHaveAttribute('aria-selected', 'true');
+  await page.evaluate(() => { (window as any).tabsFixture.failReorder = false; (window as any).tabsFixture.holdReorder = true; });
+  await page.locator('#project-order-down').click(); await expect(page.locator('#project-order-down')).toBeDisabled();
+  await page.locator('#project-order-down').evaluate((button: HTMLButtonElement) => button.click());
+  expect(await page.evaluate(() => (window as any).tabsFixture.calls.filter((call: any) => call.command === 'reorder_project').length)).toBe(2);
+  await page.evaluate(() => { (window as any).tabsFixture.holdReorder = false; (window as any).tabsFixture.releaseReorder(); });
+  await expect.poll(() => registeredProjectIds(page)).toEqual(['beta','alpha','empty']);
+  await expect(page.locator('#project-order-up')).toBeEnabled();
 });
