@@ -22,10 +22,6 @@ the selected runtime for this project, and compatible official Codex CLI version
 resizable grid, group them by working directory, search terminal output and
 enter text directly in each terminal.
 
-![OpenDIY Desktop design preview](docs/design-demo.png)
-
-*Original layout mock-up from the previous Agent Grid name, with static terminal examples; not runtime evidence.*
-
 OpenDIY Desktop is an independent MIT implementation. It does not include code,
 assets or branding from Claudes. That project's multi-terminal workflow was
 a product reference; its source-available license does not permit unapproved
