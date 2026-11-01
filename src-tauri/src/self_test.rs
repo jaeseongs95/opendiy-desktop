@@ -1,5 +1,8 @@
 //! Executable-level PTY checks. This runs before Tauri/WebView initialization and
-//! never invokes the vendor adapter, model APIs, user configuration or real apps.
+//! the default suite never invokes the vendor adapter, model APIs or real apps.
+//! --codex-smoke explicitly exercises the selected adapter.
+#[path = "self_test_controls.rs"]
+mod controls;
 use crate::{flow::{MAX_PENDING_BYTES, MAX_PENDING_FRAMES}, process_job, session::{BackendEvent, Engine, EventSink, SessionInfo, StartRequest, MAX_ACTIVE_SESSIONS}};
 use portable_pty::CommandBuilder;
 use serde::Serialize;
@@ -661,6 +664,39 @@ struct SmokeReport {
     memory: Vec<MemorySample>,
     errors: Vec<String>,
     scope: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    controls: Option<controls::ControlsReport>,
+}
+
+fn codex_smoke_options(args: &[String]) -> Result<(usize, PathBuf, bool, Option<PathBuf>, bool), String> {
+    let mut count = 1;
+    let mut report = None;
+    let mut diagnostic_terminal = false;
+    let mut engine_controls = false;
+    let mut existing_cwd = None;
+    let mut index = 1;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--codex-smoke" => {}
+            "--diagnostic-terminal" => diagnostic_terminal = true,
+            "--engine-controls" => engine_controls = true,
+            "--cwd" => { index += 1; existing_cwd = Some(PathBuf::from(args.get(index).ok_or("missing existing working directory")?)); }
+            "--sessions" => { index += 1; count = args.get(index).ok_or("missing sessions count")?.parse().map_err(|_| "invalid sessions count")?; }
+            "--report" => { index += 1; report = Some(PathBuf::from(args.get(index).ok_or("missing report path")?)); }
+            other => return Err(format!("unknown Codex smoke option: {other}")),
+        }
+        index += 1;
+    }
+    if !(1..=MAX_ACTIVE_SESSIONS).contains(&count) { return Err(format!("smoke sessions must be in 1..{MAX_ACTIVE_SESSIONS}")); }
+    let report = report.ok_or("Codex smoke requires --report <absolute-path>")?;
+    if !report.is_absolute() || !report.parent().is_some_and(Path::is_dir) { return Err("Codex smoke report must be absolute with an existing parent directory".into()); }
+    if let Some(cwd) = &existing_cwd {
+        if !cwd.is_absolute() || !cwd.is_dir() { return Err("Codex smoke --cwd must be an absolute existing directory".into()); }
+        let source = cwd.canonicalize().map_err(|e| format!("verify existing smoke directory: {e}"))?;
+        let artifacts = report.parent().expect("report parent was validated").canonicalize().map_err(|e| format!("verify smoke artifact directory: {e}"))?;
+        if artifacts.starts_with(source) { return Err("Codex smoke report artifacts must be outside the provided working directory".into()); }
+    }
+    Ok((count, report, diagnostic_terminal, existing_cwd, engine_controls))
 }
 
 /// Real adapter smoke with terminal-protocol replies only, without user text or
@@ -668,45 +704,19 @@ struct SmokeReport {
 /// at the official CLI's trust/auth/first-run UI; that is an explicit failed
 /// binding check, never permission to answer the prompt on the user's behalf.
 pub fn run_codex_smoke() -> i32 {
-    let options = (|| -> Result<(usize, PathBuf, bool, Option<PathBuf>), String> {
-        let args: Vec<_> = std::env::args().collect();
-        let mut count = 1;
-        let mut report = None;
-        let mut diagnostic_terminal = false;
-        let mut existing_cwd = None;
-        let mut index = 1;
-        while index < args.len() {
-            match args[index].as_str() {
-                "--codex-smoke" => {}
-                "--diagnostic-terminal" => diagnostic_terminal = true,
-                "--cwd" => { index += 1; existing_cwd = Some(PathBuf::from(args.get(index).ok_or("missing existing working directory")?)); }
-                "--sessions" => { index += 1; count = args.get(index).ok_or("missing sessions count")?.parse().map_err(|_| "invalid sessions count")?; }
-                "--report" => { index += 1; report = Some(PathBuf::from(args.get(index).ok_or("missing report path")?)); }
-                other => return Err(format!("unknown Codex smoke option: {other}")),
-            }
-            index += 1;
-        }
-        if !(1..=MAX_ACTIVE_SESSIONS).contains(&count) { return Err(format!("smoke sessions must be in 1..{MAX_ACTIVE_SESSIONS}")); }
-        let report = report.ok_or("Codex smoke requires --report <absolute-path>")?;
-        if !report.is_absolute() || !report.parent().is_some_and(Path::is_dir) { return Err("Codex smoke report must be absolute with an existing parent directory".into()); }
-        if let Some(cwd) = &existing_cwd {
-            if !cwd.is_absolute() || !cwd.is_dir() { return Err("Codex smoke --cwd must be an absolute existing directory".into()); }
-            let source = cwd.canonicalize().map_err(|e| format!("verify existing smoke directory: {e}"))?;
-            let artifacts = report.parent().expect("report parent was validated").canonicalize().map_err(|e| format!("verify smoke artifact directory: {e}"))?;
-            if artifacts.starts_with(source) { return Err("Codex smoke report artifacts must be outside the provided working directory".into()); }
-        }
-        Ok((count, report, diagnostic_terminal, existing_cwd))
-    })();
-    let (count, destination, diagnostic_terminal, existing_cwd) = match options { Ok(options) => options, Err(error) => { eprintln!("{error}"); return 2; } };
+    let args: Vec<_> = std::env::args().collect();
+    let (count, destination, diagnostic_terminal, existing_cwd, engine_controls) = match codex_smoke_options(&args) { Ok(options) => options, Err(error) => { eprintln!("{error}"); return 2; } };
     let start = Instant::now();
     let directory = destination.parent().expect("report parent was validated").join(format!("agent-grid-codex-smoke-{}", Uuid::new_v4().simple()));
-    let mut report = SmokeReport { schema: "agent-grid-codex-smoke-v1", pass: false, duration_seconds: 0.0, test_directory: directory.to_string_lossy().into_owned(), startup_mode: if existing_cwd.is_some() { "preexisting-cwd-read-only-startup" } else { "isolated-fresh-cwd-startup" }, preexisting_cwd: existing_cwd.as_ref().map(|cwd| cwd.to_string_lossy().into_owned()), sessions: Vec::new(), memory: Vec::new(), errors: Vec::new(), scope: "Actual Codex app-server/remote TUI startup and observed thread/status binding only. Only terminal protocol negotiation replies; no user text, model turns, approval decisions, user config writes, or GUI validation. A provided cwd is used for read-only startup; the harness writes artifacts only to its separate report/test directory. The report saves PTY hashes only; --diagnostic-terminal explicitly saves a separate bounded redacted startup prefix locally." };
+    let mut report = SmokeReport { controls: engine_controls.then(controls::ControlsReport::new), schema: "agent-grid-codex-smoke-v1", pass: false, duration_seconds: 0.0, test_directory: directory.to_string_lossy().into_owned(), startup_mode: if existing_cwd.is_some() { "preexisting-cwd-read-only-startup" } else { "isolated-fresh-cwd-startup" }, preexisting_cwd: existing_cwd.as_ref().map(|cwd| cwd.to_string_lossy().into_owned()), sessions: Vec::new(), memory: Vec::new(), errors: Vec::new(), scope: "Actual Codex app-server/remote TUI startup and observed thread/status binding only. Only terminal protocol negotiation replies; no user text, model turns, approval decisions, user config writes, or GUI validation. A provided cwd is used for read-only startup; the harness writes artifacts only to its separate report/test directory. The report saves PTY hashes only; --diagnostic-terminal explicitly saves a separate bounded redacted startup prefix locally." };
+    if engine_controls { report.scope = "Actual Codex startup plus opt-in controls on the first bound smoke session; see controls for per-check evidence and NOT_RUN scope. Only terminal negotiation replies; no user text, model turns, approval decisions, or GUI validation. Runtime preparation uses the existing Engine API in the caller-provided isolated environment."; }
     let outcome = (|| -> Result<(), String> {
         process_job::install_app_job()?;
         let baseline = process_job::app_owned_processes()?;
         report.memory.push(memory_sample(start));
         std::fs::create_dir_all(&directory).map_err(|e| format!("create isolated smoke directory: {e}"))?;
         let mut harness = Harness::new()?;
+        if engine_controls { harness.engine.prepare_runtime()?; }
         let mut starters = Vec::new();
         for index in 0..count {
             let cwd = if let Some(cwd) = &existing_cwd { cwd.clone() } else {
@@ -758,6 +768,10 @@ pub fn run_codex_smoke() -> i32 {
             let error = if !valid { Some("exact UUID and observed live status were not both established within 45 seconds; trust/auth/first-run UI was not answered".into()) } else if !output_present { Some("remote TUI emitted no captured PTY output".into()) } else { None };
             report.sessions.push(SmokeSession { cwd: info.cwd.clone(), session_id: Some(info.id.clone()), generation: Some(info.generation), thread_id: info.thread_id.clone(), observed_state: info.state.clone(), captured_pty_bytes: output.len(), captured_pty_sha256: format!("{:x}", Sha256::digest(output.as_bytes())), error });
         }
+        if let Some(controls) = report.controls.as_mut() {
+            let ready = snapshots.iter().find(|info| started.iter().any(|original| original.id == info.id) && info.thread_id.as_ref().is_some_and(|id| Uuid::parse_str(id).is_ok()) && matches!(info.state.as_str(), "idle" | "running" | "waiting"));
+            controls.run(&harness.engine, ready);
+        }
         harness.finish()?;
         let deadline = Instant::now() + Duration::from_secs(5);
         while process_job::app_owned_processes()? != baseline {
@@ -770,7 +784,7 @@ pub fn run_codex_smoke() -> i32 {
     if let Err(error) = outcome { report.errors.push(error); }
     report.memory.push(memory_sample(start));
     report.duration_seconds = start.elapsed().as_secs_f64();
-    report.pass = report.errors.is_empty() && report.sessions.len() == count && report.sessions.iter().all(|session| session.error.is_none());
+    report.pass = report.errors.is_empty() && report.sessions.len() == count && report.sessions.iter().all(|session| session.error.is_none()) && report.controls.as_ref().is_none_or(|controls| controls.pass());
     let text = match serde_json::to_string_pretty(&report) { Ok(text) => text, Err(error) => { eprintln!("serialize Codex smoke report: {error}"); return 2; } };
     if let Err(error) = std::fs::write(&destination, text.as_bytes()) { eprintln!("write Codex smoke report: {error}"); return 2; }
     println!("{text}");
@@ -799,6 +813,16 @@ mod resize_tests;
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn engine_control_smoke_requires_explicit_option_and_rejects_unknown_options() {
+        let report = std::env::temp_dir().join("opendiy-smoke-options.json");
+        let mut args = vec!["opendiy".into(), "--codex-smoke".into(), "--report".into(), report.to_string_lossy().into_owned()];
+        assert!(!super::codex_smoke_options(&args).unwrap().4);
+        args.push("--engine-controls".into());
+        assert!(super::codex_smoke_options(&args).unwrap().4);
+        args.push("--engine-control".into());
+        assert!(super::codex_smoke_options(&args).is_err());
+    }
     #[cfg(windows)]
     #[test]
     fn process_cleanup_requires_every_original_handle_to_signal_even_when_total_counts_match() {
