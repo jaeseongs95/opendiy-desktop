@@ -214,7 +214,7 @@ test('지연 항목 스냅샷은 먼저 표시된 실시간 완료·델타를 �
       { seq: fixture.nextSeq++, method: 'item/agentMessage/delta', params: { turnId: 'recent-turn', itemId: 'assistant-a', delta: ' · 최신 델타' } },
     );
   });
-  await expect(view(page).locator('[data-item-id="live-completed"]')).toHaveText('도우미실시간 완료 원문');
+  await expect(view(page).locator('[data-item-id="live-completed"] .conversation-content')).toHaveText('실시간 완료 원문');
   await expect(view(page).locator('[data-item-id="assistant-a"]')).toContainText('최신 델타');
   await page.evaluate(async () => { const state = window as any; state.conversationFixture.releaseItems(); await state.delayedRefresh; });
   await expect(view(page).locator('[data-item-id="live-completed"]')).toHaveCount(1);
@@ -281,7 +281,7 @@ test('최근 페이지와 구조화 출력은 안전한 텍스트로 보이고 �
   await page.screenshot({ path: testInfo.outputPath('conversation.png') });
   await view(page).locator('.conversation-more').click();
   await expect(view(page).locator('.conversation-message')).toHaveCount(1);
-  await expect(view(page).locator('.conversation-messages')).toHaveText('도우미이전 페이지 원문');
+  await expect(view(page).locator('.conversation-messages .conversation-content')).toHaveText('이전 페이지 원문');
   await view(page).locator('.conversation-refresh').click();
   await expect(view(page).locator('.conversation-message')).toHaveCount(3);
   await view(page).locator('.conversation-older').click();

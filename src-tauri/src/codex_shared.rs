@@ -169,8 +169,17 @@ pub(crate) struct SharedControl {
     endpoint: SharedEndpoint,
     thread_id: String,
     cwd: PathBuf,
+    capabilities: Result<super::runtime::RuntimeCapabilities, String>,
+    stopped: Arc<AtomicBool>,
 }
 impl SharedControl {
+    pub(super) fn observed_capabilities(&self, exe: &OsString, value: &Value) -> Result<Option<super::runtime::RuntimeCapabilities>, String> {
+        if self.stopped.load(Ordering::Acquire) || &self.endpoint.exe != exe || self.endpoint.socket != lifecycle_socket(value)? { return Ok(None); }
+        // 서버 교체 전 선언을 현재 서버의 선언으로 잘못 재사용하지 않는다.
+        if socket_stamp(&self.endpoint.socket)? != self.endpoint.stamp { return Ok(None); }
+        self.capabilities.clone().map(Some)
+    }
+
     /// 세대가 확인된 Desktop 세션에서 PTY를 종료하기 전에 원래 작업 ID를 고정한다.
     pub(crate) fn capture_stop(&self, deadline: Instant) -> Result<SharedStop, String> {
         let mut proxy = self.endpoint.open_until(None, Some(deadline.min(Instant::now() + STOP_TIMEOUT)))?;
@@ -241,16 +250,17 @@ fn initialize_stop_rpc<S: Read + Write>(rpc: &mut Rpc<S>) -> Result<bool, String
     rpc.send(json!({"method":"initialized","params":{}}))?;
     Ok(supported)
 }
-fn initialize_proxy(proxy: &mut Proxy) -> Result<(), String> {
-    proxy.call("initialize", initialize())?;
-    proxy.rpc.as_mut().unwrap().send(json!({"method":"initialized","params":{}}))
+fn initialize_proxy(proxy: &mut Proxy) -> Result<Value, String> {
+    let initialized = proxy.call("initialize", initialize())?;
+    proxy.rpc.as_mut().unwrap().send(json!({"method":"initialized","params":{}}))?;
+    Ok(initialized)
 }
 
 pub(super) fn prepare(cwd: &Path, requested: Option<&str>, endpoint: SharedEndpoint,
     on_event: Arc<dyn Fn(CodexEvent) + Send + Sync>, cancelled: Arc<AtomicBool>) -> Result<CodexSession, String> {
     check_cancelled(Some(&cancelled))?;
     let mut proxy = endpoint.open(Some(cancelled.clone()))?;
-    initialize_proxy(&mut proxy)?;
+    let initialized = initialize_proxy(&mut proxy)?;
     let thread = if let Some(id) = requested {
         proxy.call("thread/read", json!({"threadId":id,"includeTurns":false}))?["thread"].clone()
     } else {
@@ -267,7 +277,7 @@ pub(super) fn prepare(cwd: &Path, requested: Option<&str>, endpoint: SharedEndpo
     verified_thread(&thread, requested.unwrap_or(&id), cwd)?;
     let command = endpoint.tui(cwd, &id)?;
     let stopped = Arc::new(AtomicBool::new(false));
-    let control = SharedControl { endpoint:endpoint.clone(),thread_id:id.clone(),cwd:cwd.into() };
+    let control = SharedControl { endpoint:endpoint.clone(),thread_id:id.clone(),cwd:cwd.into(),capabilities:super::runtime::observed_capabilities(&initialized),stopped:stopped.clone() };
     let conversation = Some(ConversationConnection::new(super::conversation::Endpoint::Shared(endpoint.clone()), stopped.clone()));
     let mobile = MobileConnection::shared(endpoint, stopped.clone());
     on_event(CodexEvent::ThreadId(id.clone()));
@@ -404,10 +414,4 @@ mod expected_interrupt_tests {
         assert!(unsupported.unwrap_err().contains("정확한 작업 취소 지원"));
         assert_eq!(sent.iter().filter(|request| request["method"] == "turn/interrupt").count(), 0);
     }
-}
-
-// 상태 응답을 검증한 같은 연결점만 짧은 조회에 사용한다.
-pub(super) fn endpoint_from_status(exe: &OsString, value: &Value) -> Result<SharedEndpoint, String> {
-    let socket = lifecycle_socket(value)?;
-    Ok(SharedEndpoint { exe: exe.clone(), stamp: socket_stamp(&socket)?, socket })
 }

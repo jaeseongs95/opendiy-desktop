@@ -3,7 +3,7 @@ import { test, expect, type Page } from '@playwright/test';
 async function openSettings(page: Page, hold = false) {
   await page.addInitScript(({ hold }) => {
     const state = window as any; state.isTauri = true;
-    state.compatibilityFixture = { calls: [], reply: { executable: 'D:\\tools\\codex.exe', cliVersion: 'codex-cli 0.2.0', serverState: 'connected', serverVersion: '0.1.0', subagents: false, compactIfIdle: true, expectedTurnInterrupt: null }, release: () => {} };
+    state.compatibilityFixture = { calls: [], reply: { executable: 'D:\\tools\\codex.exe', cliVersion: 'codex-cli 0.2.0', serverState: 'running', serverVersion: '0.1.0', subagents: false, compactIfIdle: null, expectedTurnInterrupt: null }, release: () => {} };
     state.__TAURI_INTERNALS__ = { transformCallback: () => 1, unregisterCallback() {}, async invoke(command: string, args: any = {}) {
       const fixture = state.compatibilityFixture; fixture.calls.push({command,args});
       if(command.startsWith('plugin:event|')) return 1;
@@ -26,7 +26,7 @@ test('호환성은 별도 버전과 서버가 알린 기능을 표시하고 조�
   await page.locator('.compatibility-refresh').click();
   await expect(page.locator('.compatibility-details')).toContainText('codex-cli 0.2.0');
   await expect(page.locator('.compatibility-details')).toContainText('0.1.0');
-  await expect(page.locator('.compatibility-details dd')).toHaveText(['D:\\tools\\codex.exe','codex-cli 0.2.0','0.1.0','지원되지 않음','지원됨','미확인']);
+  await expect(page.locator('.compatibility-details dd')).toHaveText(['D:\\tools\\codex.exe','codex-cli 0.2.0','0.1.0','지원되지 않음','미확인','미확인']);
   await expect(page.locator('.compatibility-help')).toContainText('실행 중인 서버는 바뀌지');
   await page.locator('#codex-settings-close').click();
   await page.locator('#language-select').selectOption('en');

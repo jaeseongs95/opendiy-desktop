@@ -190,3 +190,25 @@ fn shared_capable_cli_without_backend_fails_without_an_owned_server_fallback() {
     assert!(error.contains("기존 공유 Codex 서버에 연결할 수 없습니다"), "{error}");
     assert!(error.contains("자동으로 설치하거나 시작하지 않았습니다"), "{error}");
 }
+
+#[test]
+fn compatibility_reuses_only_live_same_executable_and_socket_declarations_without_rpc() {
+    let directory = env::temp_dir().join(format!("opendiy-compatibility-{}", Uuid::new_v4()));
+    fs::create_dir(&directory).unwrap();
+    let socket = directory.join("fixture.sock"); fs::write(&socket, b"first").unwrap();
+    let exe = OsString::from("fixture.exe");
+    let endpoint = SharedEndpoint { exe: exe.clone(), socket: socket.clone(), stamp: socket_stamp(&socket).unwrap() };
+    let stopped = Arc::new(AtomicBool::new(false));
+    let control = SharedControl { endpoint, thread_id: "own-fixture".into(), cwd: directory.clone(), stopped: stopped.clone(), capabilities: super::super::runtime::observed_capabilities(&json!({"supportsSubagentManagement":true,"supportsExpectedTurnInterrupt":false})) };
+    let status = json!({"status":"running","socketPath":socket,"appServerVersion":"fixture"});
+    assert!(control.observed_capabilities(&exe, &status).unwrap().is_some());
+    assert!(control.observed_capabilities(&OsString::from("different.exe"), &status).unwrap().is_none());
+    stopped.store(true, Ordering::Release);
+    assert!(control.observed_capabilities(&exe, &status).unwrap().is_none());
+    stopped.store(false, Ordering::Release);
+    fs::write(&socket, b"replacement with different metadata").unwrap();
+    // 변경 시각 정밀도가 낮아도 명시적으로 다른 stamp를 주입해 재사용 차단을 검사한다.
+    let mut replaced = control.clone(); replaced.endpoint.stamp.modified = Some(SystemTime::UNIX_EPOCH);
+    assert!(replaced.observed_capabilities(&exe, &status).unwrap().is_none());
+    fs::remove_file(&socket).unwrap(); fs::remove_dir(&directory).unwrap();
+}

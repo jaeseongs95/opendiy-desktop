@@ -2,7 +2,7 @@ import { onLanguageChange, t } from './i18n';
 
 type Report = {
   executable: string; cliVersion: string | null; serverVersion: string | null;
-  serverState: 'connected' | 'unsupported' | 'unavailable';
+  serverState: 'running' | 'unsupported' | 'unavailable';
   subagents: boolean | null; compactIfIdle: boolean | null; expectedTurnInterrupt: boolean | null;
 };
 
@@ -21,9 +21,9 @@ export function createRuntimeCompatibility(call: <T>(command: string) => Promise
   function render() {
     element.querySelector('h3')!.textContent = t('실행 기반 호환성', 'Runtime compatibility');
     element.querySelector('.compatibility-help')!.textContent = t('선택한 실행 파일과 현재 공유서버를 따로 확인합니다. 파일을 바꿔도 실행 중인 서버는 바뀌지 않습니다.', 'Check the selected executable and current shared server separately. Choosing a file does not replace a running server.');
-    element.querySelector('.compatibility-scope')!.textContent = t('지원 표시는 서버가 알린 기능입니다. 각 세션의 연결·권한·작업 상태는 해당 기능에서 추가 확인합니다. 서버 갱신은 진행 중인 작업을 마친 뒤 별도로 진행하세요.', 'Support reflects server declarations. Each feature also checks its session connection, permissions and task state. Update the server separately after completing ongoing work.');
+    element.querySelector('.compatibility-scope')!.textContent = t('기능 지원은 이미 열린 세션에서 확인한 같은 서버의 선언만 표시합니다. 확인되지 않은 기능은 미확인이며, 조회를 위해 세션을 재개하지 않습니다. 각 기능에서 연결·권한·작업 상태를 추가 확인합니다. 서버 갱신은 작업을 마친 뒤 별도로 진행하세요.', 'Support uses declarations already received by open sessions connected to the same server. Unobserved features remain unknown; checking does not resume sessions. Each feature also checks connection, permissions and task state. Update the server separately after ongoing work finishes.');
     refresh.textContent = t('호환성 확인', 'Check compatibility'); refresh.disabled = !!pending;
-    status.textContent = state === 'loading' ? t('확인 중…', 'Checking…') : state === 'failed' ? t('호환성을 확인하지 못했습니다. 실행 파일과 서버 상태를 확인한 뒤 다시 조회하세요.', 'Could not check compatibility. Check the executable and server status, then retry.') : state === 'empty' ? t('호환성 확인을 눌러 현재 상태를 조회하세요.', 'Check compatibility to read the current state.') : report?.serverState === 'connected' ? t('현재 공유서버의 응답을 확인했습니다.', 'Received the current shared server response.') : report?.serverState === 'unsupported' ? t('선택한 실행 파일에 공유서버 조회 기능이 없습니다. 개별 세션의 지원 여부를 확인하세요.', 'The selected executable has no shared-server query support. Check support in each session.') : t('공유서버 연결을 확인하지 못했습니다. 서버 실행 상태를 확인한 뒤 다시 조회하세요.', 'Could not confirm the shared server connection. Check that the server is running, then retry.');
+    status.textContent = state === 'loading' ? t('확인 중…', 'Checking…') : state === 'failed' ? t('호환성을 확인하지 못했습니다. 실행 파일과 서버 상태를 확인한 뒤 다시 조회하세요.', 'Could not check compatibility. Check the executable and server status, then retry.') : state === 'empty' ? t('호환성 확인을 눌러 현재 상태를 조회하세요.', 'Check compatibility to read the current state.') : report?.serverState === 'running' ? t('현재 공유서버의 실행 정보를 확인했습니다.', 'Read the current shared server status.') : report?.serverState === 'unsupported' ? t('선택한 실행 파일에 공유서버 조회 기능이 없습니다. 개별 세션의 지원 여부를 확인하세요.', 'The selected executable has no shared-server query support. Check support in each session.') : t('공유서버 연결을 확인하지 못했습니다. 서버 실행 상태를 확인한 뒤 다시 조회하세요.', 'Could not confirm the shared server connection. Check that the server is running, then retry.');
     details.replaceChildren(); details.hidden = !report;
     if (!report) return;
     for (const [title, value] of [
@@ -42,7 +42,7 @@ export function createRuntimeCompatibility(call: <T>(command: string) => Promise
     const operation = call<Report>('runtime_compatibility'); pending = operation; render();
     void operation.then(value => {
       if (generation !== token || !element.closest('dialog')?.open) return;
-      if (!value || typeof value.executable !== 'string' || !['connected','unsupported','unavailable'].includes(value.serverState)
+      if (!value || typeof value.executable !== 'string' || !['running','unsupported','unavailable'].includes(value.serverState)
         || [value.cliVersion,value.serverVersion].some(item => item !== null && (typeof item !== 'string' || item.length > 1024))
         || [value.subagents,value.compactIfIdle,value.expectedTurnInterrupt].some(item => item !== null && typeof item !== 'boolean')) throw new Error('Invalid compatibility response');
       report = value; state = 'ready';

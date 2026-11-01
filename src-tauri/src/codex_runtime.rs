@@ -40,17 +40,19 @@ fn capability(value: &Value, field: &str) -> Result<Option<bool>, String> {
         _ => Err("공유 서버의 기능 지원 응답을 확인할 수 없습니다.".into()),
     }
 }
-fn apply_capabilities(report: &mut RuntimeCompatibility, value: &Value) -> Result<(), String> {
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct RuntimeCapabilities {
+    subagents: Option<bool>, expected_turn_interrupt: Option<bool>,
+}
+pub(super) fn observed_capabilities(value: &Value) -> Result<RuntimeCapabilities, String> {
     if !value.is_object() { return Err("공유 서버의 초기화 응답이 올바르지 않습니다.".into()); }
-    // 모두 확인된 뒤에만 게시하여 부분 응답을 지원됨으로 표시하지 않는다.
-    let subagents = capability(value, "supportsSubagentManagement")?;
-    let compact = capability(value, "supportsCompactIfIdle")?;
-    let interrupt = capability(value, "supportsExpectedTurnInterrupt")?;
-    report.subagents = subagents; report.compact_if_idle = compact; report.expected_turn_interrupt = interrupt;
-    Ok(())
+    Ok(RuntimeCapabilities {
+        subagents: capability(value, "supportsSubagentManagement")?,
+        expected_turn_interrupt: capability(value, "supportsExpectedTurnInterrupt")?,
+    })
 }
 
-pub fn inspect(exe: &OsString, cancelled: &Arc<AtomicBool>) -> Result<RuntimeCompatibility, String> {
+pub fn inspect(exe: &OsString, cancelled: &Arc<AtomicBool>, observed: &[shared::SharedControl]) -> Result<RuntimeCompatibility, String> {
     let _request = COMPATIBILITY_REQUEST.try_lock().map_err(|_| "호환성을 확인 중입니다. 잠시 후 다시 시도하세요.")?;
     check_cancelled(Some(cancelled))?;
     let cwd = env::current_dir().map_err(|e| format!("호환성 확인 폴더 조회 실패: {e}"))?;
@@ -64,21 +66,19 @@ pub fn inspect(exe: &OsString, cancelled: &Arc<AtomicBool>) -> Result<RuntimeCom
     };
     let server = (|| {
         let Some(value) = discover(query)? else { report.server_state = "unsupported"; return Ok(()); };
-        let endpoint = shared::endpoint_from_status(exe, &value)?;
-        let mut proxy = endpoint.open_until(Some(cancelled.clone()), Some(deadline))?;
-        let result = (|| {
-            let value = proxy.call("initialize", initialize())?;
-            proxy.rpc.as_mut().ok_or("호환성 연결이 닫혔습니다.")?.send(json!({"method":"initialized","params":{}}))?;
-            apply_capabilities(&mut report, &value)
-        })();
-        let cleanup = proxy.finish();
-        match (result, cleanup) {
-            (Ok(()), Ok(())) => {},
-            (Err(error), Ok(())) | (Ok(()), Err(error)) => return Err(error),
-            (Err(error), Err(cleanup)) => return Err(format!("{error}; 호환성 연결 정리 실패: {cleanup}")),
+        // 진단을 위해 연결을 초기화하지 않는다. 기존 세션의 같은 서버 선언만 재사용한다.
+        let mut snapshot: Option<RuntimeCapabilities> = None;
+        for control in observed {
+            if let Some(value) = control.observed_capabilities(exe, &value)? {
+                if snapshot.as_ref().is_some_and(|previous| previous != &value) {
+                    return Err("기존 연결의 지원 정보가 서로 달라 확인하지 못했습니다.".into());
+                }
+                snapshot = Some(value);
+            }
         }
+        if let Some(value) = snapshot { report.subagents = value.subagents; report.expected_turn_interrupt = value.expected_turn_interrupt; }
         report.server_version = Some(value["appServerVersion"].as_str().ok_or("공유 서버 버전이 없습니다.")?.to_owned());
-        report.server_state = "connected";
+        report.server_state = "running";
         Ok(())
     })();
     if let Err(error) = server {
@@ -107,12 +107,11 @@ mod tests {
     }
     #[test]
     fn support_is_not_inferred_from_version_or_malformed_flags() {
-        let mut snapshot = report();
-        apply_capabilities(&mut snapshot, &json!({"supportsSubagentManagement":true,"supportsCompactIfIdle":false})).unwrap();
-        assert_eq!(snapshot.subagents, Some(true)); assert_eq!(snapshot.compact_if_idle, Some(false)); assert_eq!(snapshot.expected_turn_interrupt, None);
-        let mut snapshot = report();
-        assert!(apply_capabilities(&mut snapshot, &json!({"supportsSubagentManagement":true,"supportsCompactIfIdle":"true"})).is_err());
-        assert_eq!(snapshot.subagents, None);
-        assert!(apply_capabilities(&mut snapshot, &Value::Null).is_err());
+        let snapshot = observed_capabilities(&json!({"supportsSubagentManagement":true,"supportsCompactIfIdle":true})).unwrap();
+        assert_eq!(snapshot.subagents, Some(true)); assert_eq!(snapshot.expected_turn_interrupt, None);
+        // 압축 선언은 passive 구독의 범위이므로 initialize에 있어도 표시하지 않는다.
+        assert!(observed_capabilities(&json!({"supportsSubagentManagement":true,"supportsExpectedTurnInterrupt":"true"})).is_err());
+        assert!(observed_capabilities(&Value::Null).is_err());
+        assert_eq!(report().compact_if_idle, None);
     }
 }

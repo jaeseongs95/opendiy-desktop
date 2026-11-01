@@ -731,7 +731,18 @@ impl Engine {
 
     pub fn runtime_compatibility(&self) -> Result<codex::RuntimeCompatibility, String> {
         let selected = self.runtime_snapshot()?;
-        let report = codex::inspect_runtime(&selected.executable, &self.inner.exiting)?;
+        // 잠금 아래에서는 제어 핸들만 복제하고 파일·프로세스 조회는 모두 밖에서 한다.
+        let sessions: Vec<_> = self.inner.sessions.lock().map_err(|_| "세션 목록 잠금 실패")?.values().cloned().collect();
+        let mut observed = Vec::new();
+        for session in sessions {
+            if session.phase.load(Ordering::Acquire) != 1 { continue; }
+            let process = session.process.lock().map_err(|_| "세션 프로세스 잠금 실패")?.clone();
+            if let Some(process) = process {
+                let control = process.adapter.lock().map_err(|_| "세션 연결 잠금 실패")?.as_ref().and_then(CodexSession::shared_control);
+                if let Some(control) = control { observed.push(control); }
+            }
+        }
+        let report = codex::inspect_runtime(&selected.executable, &self.inner.exiting, &observed)?;
         let runtime = self.inner.runtime.lock().map_err(|_| "실행파일 선택 잠금이 손상되었습니다.")?;
         self.verify_runtime_selection(&selected, &runtime, &self.inner.exiting)?;
         Ok(report)

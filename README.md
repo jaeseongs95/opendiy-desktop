@@ -149,7 +149,7 @@ Start a new session to use changed extensions; running terminals are not restart
 
 ## Runtime compatibility and attachment storage
 
-Use **Settings → Executable settings → Check compatibility** to compare the selected executable version with the current shared-server version and inspect declared subagent, safe compaction and exact-turn interruption support. This query does not install, start or replace a server. Selecting an executable does not update an already running server. Each feature also checks the actual session permissions and task state.
+Use **Settings → Executable settings → Check compatibility** to compare the selected executable version with the current shared-server version and inspect declared subagent, safe compaction and exact-turn interruption support. Feature declarations are reused only from existing open sessions connected to the same server; unobserved features remain unknown. Compaction is checked separately by a passive session subscription and stays unknown in this diagnostic. Checking does not initialize a diagnostic connection or resume a session. This query does not install, start or replace a server. Selecting an executable does not update an already running server. Each feature also checks the actual session permissions and task state.
 
 Use **Settings → Attachment storage** to inspect app-owned image usage and limits, distinguishing current-process unsent drafts, retained images and other files such as those from previous runs. Original local files are excluded. Remove draft attachments in their original session to free space. Submitted images, uncertain sends and files with unknown ownership are preserved.
 
