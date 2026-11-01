@@ -729,6 +729,14 @@ impl Engine {
         Ok(connection)
     }
 
+    pub fn runtime_compatibility(&self) -> Result<codex::RuntimeCompatibility, String> {
+        let selected = self.runtime_snapshot()?;
+        let report = codex::inspect_runtime(&selected.executable, &self.inner.exiting)?;
+        let runtime = self.inner.runtime.lock().map_err(|_| "실행파일 선택 잠금이 손상되었습니다.")?;
+        self.verify_runtime_selection(&selected, &runtime, &self.inner.exiting)?;
+        Ok(report)
+    }
+
     pub fn prepare_runtime(&self) -> Result<(), String> {
         if self.inner.exiting.load(Ordering::Acquire) { return Err("앱이 종료 중이어서 공유 서버를 시작하지 않았습니다.".into()); }
         self.prepare_selected_runtime_with(self.runtime_snapshot()?, true, &self.inner.exiting, |exe| codex::prepare_runtime_with_executable(exe, &self.inner.exiting)).map(|_| ())

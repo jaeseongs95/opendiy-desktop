@@ -1,3 +1,4 @@
+import { createAttachmentStorage } from './attachment-storage';
 import { invoke, isTauri } from '@tauri-apps/api/core';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { Terminal } from '@xterm/xterm';
@@ -104,7 +105,7 @@ $('#app').innerHTML = `
     <footer><span class="footer-hints">드래그로 순서 변경 <i>·</i> 경계선으로 크기 조절 <i>·</i> Alt + 1–9</span><span id="save-status">레이아웃 자동 저장</span></footer>
   </main>
   <div id="toast-area" class="toast-area" role="status" aria-live="polite"></div>
-  <dialog id="settings-dialog" aria-labelledby="settings-title"><div class="dialog-heading"><h2 id="settings-title">설정</h2><button id="settings-close" class="icon-button" data-close aria-label="설정 닫기" autofocus>×</button></div><div class="settings-options"><button id="codex-settings-open" class="side-link" aria-haspopup="dialog" aria-controls="codex-settings-dialog"><span>⚙</span> 실행 파일 설정</button><button id="extensions-open" class="side-link" aria-haspopup="dialog" aria-controls="extensions-dialog"><span>◇</span> <span id="extensions-open-label">플러그인·스킬</span></button><button id="external-toggle" class="side-link" aria-haspopup="dialog" aria-controls="external-dialog"><span>◉</span> 외부 세션 <span class="readonly">읽기 전용</span></button></div><div class="language-setting"><label for="language-select">언어</label><select id="language-select"><option value="ko">한국어</option><option value="en">English</option></select><small id="language-error" role="alert" hidden></small></div></dialog>
+  <dialog id="settings-dialog" aria-labelledby="settings-title"><div class="dialog-heading"><h2 id="settings-title">설정</h2><button id="settings-close" class="icon-button" data-close aria-label="설정 닫기" autofocus>×</button></div><div class="settings-options"><button id="codex-settings-open" class="side-link" aria-haspopup="dialog" aria-controls="codex-settings-dialog"><span>⚙</span> 실행 파일 설정</button><button id="attachment-storage-open" class="side-link" aria-haspopup="dialog" aria-controls="attachment-storage-dialog"><span>▣</span> 첨부 저장 공간</button><button id="extensions-open" class="side-link" aria-haspopup="dialog" aria-controls="extensions-dialog"><span>◇</span> <span id="extensions-open-label">플러그인·스킬</span></button><button id="external-toggle" class="side-link" aria-haspopup="dialog" aria-controls="external-dialog"><span>◉</span> 외부 세션 <span class="readonly">읽기 전용</span></button></div><div class="language-setting"><label for="language-select">언어</label><select id="language-select"><option value="ko">한국어</option><option value="en">English</option></select><small id="language-error" role="alert" hidden></small></div></dialog>
   <dialog id="create-dialog"><form id="create-form"><div class="dialog-heading"><span class="eyebrow">NEW SESSION</span><button type="button" class="icon-button" data-close aria-label="닫기">×</button></div><h2>새 세션 만들기</h2><p>선택한 프로젝트에서 로컬 에이전트를 시작합니다.</p><label for="session-title">세션 이름</label><input id="session-title" name="title" placeholder="예: API 개선" required maxlength="120"/><label for="session-cwd">프로젝트 경로</label><input id="session-cwd" name="cwd" placeholder="C:\\work\\my-project" required/><small>실제로 존재하는 로컬 디렉터리의 절대 경로를 입력하세요.</small><label for="session-thread">이어갈 스레드 ID <span class="optional">선택</span></label><input id="session-thread" name="thread" placeholder="비워 두면 새 대화로 시작합니다"/><div id="create-error" class="inline-error" role="alert" hidden></div><div class="dialog-actions"><button type="button" class="quiet-button" data-close>취소</button><button id="create-submit" class="primary-button" type="submit">세션 시작 →</button></div></form></dialog>
   <dialog id="restore-dialog"><div class="dialog-heading"><span class="eyebrow">SAVED WORKSPACE</span><button class="icon-button" data-close aria-label="닫기">×</button></div><h2>저장된 세션</h2><p>이전에 실행 중이던 대화는 자동으로 연결합니다. 남은 항목은 선택해서 다시 연결할 수 있습니다.</p><div id="restore-list" class="restore-list"></div></dialog>
   <dialog id="external-dialog"><div class="dialog-heading"><span class="eyebrow">READ ONLY</span><button class="icon-button" data-close aria-label="닫기">×</button></div><h2>외부 세션</h2><p>다른 앱에서 발견한 기록입니다. 관측 정보이며 현재 실행 상태는 미확인입니다. 입력하거나 종료할 수 없습니다.</p><button id="external-refresh" class="quiet-button">새로 고침</button><div id="external-list" class="external-list"></div></dialog>
@@ -122,6 +123,7 @@ const markupLabels: Record<string, [string, string]> = {
   "세션 목록": ["세션 목록", "Session list"],
   "외부 세션": ["외부 세션", "External sessions"],
   "읽기 전용": ["읽기 전용", "Read only"],
+  "첨부 저장 공간": ["첨부 저장 공간", "Attachment storage"],
   "실행 파일 설정": ["실행 파일 설정", "Executable settings"],
   "설정": ["설정", "Settings"],
   "설정 열기": ["설정 열기", "Open settings"],
@@ -872,6 +874,8 @@ document.body.append(questionCenter.element);
 $('.sidebar').append(weeklyUsage.element);
 bindText($('#extensions-open-label'), '플러그인·스킬', 'Plugins & skills');
 $('#extensions-open').onclick = () => extensionsManager.open(selectedProjectCwd());
+const attachmentStorage = createAttachmentStorage(call, id => sessions.get(id)?.title);
+$('#attachment-storage-open').onclick = () => attachmentStorage.open();
 const executableSettings = createExecutableSettings(async <T>(command: string, args?: Record<string, unknown>) => {
   if (!['choose_codex_executable', 'set_codex_executable'].includes(command)) return call<T>(command, args);
   runtimeGeneration++; runtimePreparation = undefined; runtimeReady = false;

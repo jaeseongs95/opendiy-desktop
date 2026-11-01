@@ -7,6 +7,28 @@ const MAX_SESSION_BYTES: usize = 64 * 1024 * 1024;
 const MAX_TOTAL_BYTES: usize = 256 * 1024 * 1024;
 const MAX_SESSION_FILES: usize = 64;
 const MAX_ATTACHMENTS: usize = 32;
+const MAX_STORAGE_ENTRIES: usize = 16384;
+const MAX_STORAGE_SESSIONS: usize = 100;
+
+#[derive(Debug, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AttachmentStorageUsage {
+    total_bytes: u64,
+    total_files: usize,
+    limit_bytes: u64,
+    draft_bytes: u64,
+    draft_files: usize,
+    retained_bytes: u64,
+    retained_files: usize,
+    other_bytes: u64,
+    other_files: usize,
+    draft_sessions: Vec<AttachmentStorageSession>,
+    omitted_sessions: usize,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AttachmentStorageSession { session_id: String, bytes: u64, files: usize }
 
 #[derive(Clone, Debug, Serialize)]
 pub struct ConversationAttachment {
@@ -33,6 +55,46 @@ struct BusyPicker(Arc<AtomicBool>);
 impl Drop for BusyPicker { fn drop(&mut self) { self.0.store(false, Ordering::Release); } }
 
 impl ConversationAttachments {
+    /// Metadata only. This snapshot never grants deletion authority and never
+    /// classifies previous-process or ambiguous-send files as removable drafts.
+    pub fn storage_usage(&self) -> Result<AttachmentStorageUsage, String> {
+        // Keep the same order as stage_image: process state, then disk lock.
+        // Admission is nonblocking so refreshes cannot queue behind image work.
+        let staged = self.staged.try_lock().map_err(|error| match error {
+            std::sync::TryLockError::WouldBlock => "다른 이미지 저장 작업이 진행 중입니다. 잠시 후 다시 시도하세요.",
+            std::sync::TryLockError::Poisoned(_) => "임시 첨부 파일 상태 잠금 실패",
+        })?;
+        let mut usage = AttachmentStorageUsage { limit_bytes: MAX_TOTAL_BYTES as u64, ..Default::default() };
+        match fs::symlink_metadata(&staged.root) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(usage),
+            Err(error) => return Err(format!("임시 이미지 저장소 검사 실패: {error}")),
+            Ok(_) => (),
+        }
+        let _disk_lock = staging_lock(&staged.root)?;
+        if staged.sessions.len() > MAX_STORAGE_ENTRIES { return Err("임시 이미지 세션 수 상한을 초과했습니다.".into()); }
+        let owners: BTreeMap<_, _> = staged.sessions.iter().map(|(id, session)| (session.directory.as_path(), (id, session))).collect();
+        let mut drafts: BTreeMap<String, AttachmentStorageSession> = BTreeMap::new();
+        usage.total_bytes = storage_disk_bytes(&staged.root, &mut |path, bytes| {
+            if bytes == 0 && path == staged.root.join(".staging.lock") { return; }
+            usage.total_files += 1;
+            let owner = path.parent().and_then(|parent| owners.get(parent));
+            let tracked = owner.and_then(|(_, session)| path.to_str().and_then(|path| session.files.get(path)));
+            match tracked {
+                Some(file) if file.retained.is_some() => { usage.retained_bytes += bytes; usage.retained_files += 1; }
+                Some(_) => {
+                    usage.draft_bytes += bytes; usage.draft_files += 1;
+                    let id = owner.expect("tracked files have an owner").0;
+                    let summary = drafts.entry(id.clone()).or_insert_with(|| AttachmentStorageSession { session_id: id.clone(), bytes: 0, files: 0 });
+                    summary.bytes += bytes; summary.files += 1;
+                }
+                None => { usage.other_bytes += bytes; usage.other_files += 1; }
+            }
+        })?;
+        usage.omitted_sessions = drafts.len().saturating_sub(MAX_STORAGE_SESSIONS);
+        usage.draft_sessions = drafts.into_values().take(MAX_STORAGE_SESSIONS).collect();
+        Ok(usage)
+    }
+
     #[cfg(test)]
     pub(crate) fn test_store(root: PathBuf) -> Self {
         Self { staged: Arc::new(Mutex::new(Staging { root, sessions: BTreeMap::new() })), ..Self::default() }
@@ -206,26 +268,44 @@ fn staging_lock(root: &Path) -> Result<fs::File, String> {
     Ok(file)
 }
 
-fn check_disk_budget(root: &Path, additional: usize) -> Result<(), String> {
-    fn visit(directory: &Path, depth: u8, entries: &mut usize, bytes: &mut u64) -> Result<(), String> {
-        for entry in fs::read_dir(directory).map_err(|e| format!("임시 이미지 용량 조회 실패: {e}"))? {
-            *entries += 1;
-            if *entries > 16384 { return Err("임시 이미지 저장소의 항목 수 상한을 초과했습니다.".into()); }
-            let entry = entry.map_err(|e| format!("임시 이미지 항목 조회 실패: {e}"))?;
-            let metadata = plain_metadata(&entry.path())?;
-            if metadata.is_dir() {
-                if depth == 0 { return Err("임시 이미지 저장소의 폴더 구조가 올바르지 않습니다.".into()); }
-                visit(&entry.path(), depth - 1, entries, bytes)?;
-            } else if metadata.is_file() {
-                *bytes = bytes.checked_add(metadata.len()).ok_or("임시 이미지 용량 합계가 범위를 초과했습니다.")?;
-                if *bytes > MAX_TOTAL_BYTES as u64 { return Err("앱의 임시 이미지 용량 상한 256MiB를 초과했습니다.".into()); }
-            } else { return Err("임시 이미지 저장소에 지원하지 않는 항목이 있습니다.".into()); }
-        }
-        Ok(())
+// One fixed directory level, metadata only, bounded independently of file sizes.
+// No caller path is accepted and links/reparse points are rejected by plain_metadata.
+fn storage_disk_bytes(root: &Path, inspect: &mut impl FnMut(&Path, u64)) -> Result<u64, String> {
+    fn entries(directory: &Path) -> Result<fs::ReadDir, String> {
+        fs::read_dir(directory).map_err(|e| format!("임시 이미지 용량 조회 실패: {e}"))
     }
-    let (mut entries, mut bytes) = (0, additional as u64);
-    if bytes > MAX_TOTAL_BYTES as u64 { return Err("앱의 임시 이미지 용량 상한 256MiB를 초과했습니다.".into()); }
-    visit(root, 1, &mut entries, &mut bytes)
+    fn inspect_entry(entry: std::io::Result<fs::DirEntry>, count: &mut usize) -> Result<(PathBuf, fs::Metadata), String> {
+        *count += 1;
+        if *count > MAX_STORAGE_ENTRIES { return Err("임시 이미지 저장소의 항목 수 상한을 초과했습니다.".into()); }
+        let path = entry.map_err(|e| format!("임시 이미지 항목 조회 실패: {e}"))?.path();
+        let metadata = plain_metadata(&path)?;
+        Ok((path, metadata))
+    }
+    let (mut count, mut bytes) = (0, 0u64);
+    let mut file = |path: &Path, metadata: fs::Metadata| -> Result<(), String> {
+        if !metadata.is_file() { return Err("임시 이미지 저장소의 폴더 구조 또는 항목이 올바르지 않습니다.".into()); }
+        bytes = bytes.checked_add(metadata.len()).ok_or("임시 이미지 용량 합계가 범위를 초과했습니다.")?;
+        inspect(path, metadata.len());
+        Ok(())
+    };
+    for entry in entries(root)? {
+        let (path, metadata) = inspect_entry(entry, &mut count)?;
+        if metadata.is_dir() {
+            for entry in entries(&path)? {
+                let (path, metadata) = inspect_entry(entry, &mut count)?;
+                file(&path, metadata)?;
+            }
+        } else { file(&path, metadata)?; }
+    }
+    Ok(bytes)
+}
+
+fn check_disk_budget(root: &Path, additional: usize) -> Result<(), String> {
+    let bytes = storage_disk_bytes(root, &mut |_, _| {})?;
+    if bytes.checked_add(additional as u64).is_none_or(|bytes| bytes > MAX_TOTAL_BYTES as u64) {
+        return Err("앱의 임시 이미지 용량 상한 256MiB를 초과했습니다.".into());
+    }
+    Ok(())
 }
 
 fn remove_owned_file(path: &str) -> Result<(), String> {
@@ -418,6 +498,82 @@ fn validate_image(_: &[u8], _: &str) -> Result<(), String> { Err("클립보드 �
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn storage_snapshot_distinguishes_drafts_retention_and_unknown_without_deleting() {
+        let root = std::env::temp_dir().join(format!("opendiy-storage-snapshot-test-{}", uuid::Uuid::new_v4()));
+        let directory = root.join(uuid::Uuid::new_v4().to_string());
+        let previous = root.join(uuid::Uuid::new_v4().to_string());
+        fs::create_dir(&root).unwrap(); fs::create_dir(&directory).unwrap(); fs::create_dir(&previous).unwrap();
+        let draft = directory.join("draft.png"); let retained = directory.join("retained.png"); let unknown = previous.join("old.png");
+        fs::write(&draft, [1, 2]).unwrap(); fs::write(&retained, [3, 4, 5]).unwrap(); fs::write(&unknown, [6, 7, 8, 9]).unwrap();
+        let manager = ConversationAttachments::test_store(root.clone());
+        let id = uuid::Uuid::new_v4().to_string();
+        manager.staged.lock().unwrap().sessions.insert(id.clone(), StagedSession {
+            directory: directory.clone(),
+            files: [(draft.to_str().unwrap().to_owned(), StagedFile { bytes: 999, retained: None }),
+                (retained.to_str().unwrap().to_owned(), StagedFile { bytes: 999, retained: None })].into_iter().collect(),
+        });
+        // Ambiguous send claims remain retained, regardless of the draft UI.
+        drop(manager.retain_for_send(&id, &[retained.to_str().unwrap().to_owned()]).unwrap());
+        let usage = manager.storage_usage().unwrap();
+        assert_eq!((usage.total_bytes, usage.total_files), (9, 3));
+        assert_eq!((usage.draft_bytes, usage.draft_files), (2, 1));
+        assert_eq!((usage.retained_bytes, usage.retained_files), (3, 1));
+        assert_eq!((usage.other_bytes, usage.other_files), (4, 1));
+        assert_eq!(usage.limit_bytes, MAX_TOTAL_BYTES as u64);
+        assert_eq!(usage.draft_sessions[0].session_id, id);
+        assert_eq!(usage.draft_sessions[0].bytes, 2, "실제 메타데이터를 집계한다");
+        let serialized = serde_json::to_string(&usage).unwrap();
+        assert!(!serialized.contains("draft.png") && !serialized.contains(root.to_str().unwrap()));
+        for path in [&draft, &retained, &unknown] { assert!(path.is_file()); }
+        assert!(manager.cleanup_staged(&id, retained.to_str().unwrap()).is_err());
+        manager.cleanup_all().unwrap(); drop(manager);
+        fs::remove_file(retained).unwrap(); fs::remove_file(unknown).unwrap();
+        fs::remove_dir(directory).unwrap(); fs::remove_dir(previous).unwrap();
+        fs::remove_file(root.join(".staging.lock")).unwrap(); fs::remove_dir(root).unwrap();
+    }
+
+    #[test]
+    fn storage_query_is_nonblocking_and_does_not_create_an_unused_store() {
+        let root = std::env::temp_dir().join(format!("opendiy-storage-empty-test-{}", uuid::Uuid::new_v4()));
+        let manager = ConversationAttachments::test_store(root.clone());
+        assert_eq!(manager.storage_usage().unwrap().total_bytes, 0);
+        assert!(!root.exists());
+        let state_lock = manager.staged.lock().unwrap();
+        assert!(manager.storage_usage().unwrap_err().contains("다른 이미지 저장 작업"));
+        drop(state_lock);
+        let disk_lock = staging_lock(&root).unwrap();
+        assert!(manager.storage_usage().is_err());
+        drop(disk_lock);
+        assert!(manager.storage_usage().is_ok());
+        fs::remove_file(root.join(".staging.lock")).unwrap(); fs::remove_dir(root).unwrap();
+    }
+
+    #[test]
+    fn storage_metadata_response_is_bounded_and_rejects_nested_directories() {
+        let root = std::env::temp_dir().join(format!("opendiy-storage-bound-test-{}", uuid::Uuid::new_v4()));
+        fs::create_dir(&root).unwrap();
+        let manager = ConversationAttachments::test_store(root.clone());
+        for _ in 0..MAX_STORAGE_SESSIONS + 1 {
+            let id = uuid::Uuid::new_v4().to_string();
+            let directory = root.join(uuid::Uuid::new_v4().to_string());
+            fs::create_dir(&directory).unwrap();
+            let path = directory.join("draft.png"); fs::write(&path, [1]).unwrap();
+            manager.staged.lock().unwrap().sessions.insert(id, StagedSession { directory, files: [(path.to_str().unwrap().to_owned(), StagedFile { bytes: 1, retained: None })].into_iter().collect() });
+        }
+        let usage = manager.storage_usage().unwrap();
+        assert_eq!(usage.draft_files, MAX_STORAGE_SESSIONS + 1);
+        assert_eq!(usage.draft_sessions.len(), MAX_STORAGE_SESSIONS);
+        assert_eq!(usage.omitted_sessions, 1);
+        let outer = root.join("unexpected"); let nested = outer.join("nested");
+        fs::create_dir(&outer).unwrap(); fs::create_dir(&nested).unwrap();
+        assert!(manager.storage_usage().is_err());
+        assert!(nested.is_dir(), "조회는 구조가 잘못된 파일도 삭제하지 않는다");
+        fs::remove_dir(nested).unwrap(); fs::remove_dir(outer).unwrap();
+        manager.cleanup_all().unwrap(); drop(manager);
+        fs::remove_file(root.join(".staging.lock")).unwrap(); fs::remove_dir(root).unwrap();
+    }
 
     #[test]
     fn strict_base64_rejects_malformed_and_oversized_input() {

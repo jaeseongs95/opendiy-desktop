@@ -65,7 +65,7 @@ fn prepare_runtime_commands(
         }
     }
 }
-fn lifecycle_value(bytes: &[u8]) -> Result<Value, String> {
+pub(super) fn lifecycle_value(bytes: &[u8]) -> Result<Value, String> {
     serde_json::from_slice(bytes).map_err(|_| "공유 서버 상태 응답이 올바른 JSON이 아닙니다.".into())
 }
 
@@ -136,7 +136,7 @@ impl SharedEndpoint {
         Ok(command)
     }
 }
-fn supports_shared(bytes: &[u8]) -> Result<bool, String> {
+pub(super) fn supports_shared(bytes: &[u8]) -> Result<bool, String> {
     // 기존 도움말 검증기로 usage와 options 선언을 먼저 확인한다.
     help_supports_option(bytes, "--help")?;
     let help = std::str::from_utf8(bytes).map_err(|_| "Codex 도움말이 올바른 UTF-8이 아닙니다.")?;
@@ -153,7 +153,7 @@ fn supports_shared(bytes: &[u8]) -> Result<bool, String> {
     let declared = |name: &str| lines.iter().any(|line| line.len() - line.trim_start().len() == column && line.split_ascii_whitespace().next() == Some(name));
     Ok(declared("daemon") && declared("proxy"))
 }
-fn lifecycle_socket(value: &Value) -> Result<PathBuf, String> {
+pub(super) fn lifecycle_socket(value: &Value) -> Result<PathBuf, String> {
     if value["status"] != "running" || !value["appServerVersion"].as_str().is_some_and(|v| !v.is_empty()) {
         return Err("공유 서버의 실행 상태와 버전을 확인할 수 없습니다.".into());
     }
@@ -404,4 +404,10 @@ mod expected_interrupt_tests {
         assert!(unsupported.unwrap_err().contains("정확한 작업 취소 지원"));
         assert_eq!(sent.iter().filter(|request| request["method"] == "turn/interrupt").count(), 0);
     }
+}
+
+// 상태 응답을 검증한 같은 연결점만 짧은 조회에 사용한다.
+pub(super) fn endpoint_from_status(exe: &OsString, value: &Value) -> Result<SharedEndpoint, String> {
+    let socket = lifecycle_socket(value)?;
+    Ok(SharedEndpoint { exe: exe.clone(), stamp: socket_stamp(&socket)?, socket })
 }

@@ -21,9 +21,12 @@ const string = (value: unknown) => typeof value === 'string' ? value : '';
 /** One controller owns one session's draft, bounded visible page and GUI input lease. */
 export function createConversation(options: ConversationOptions) {
   const { host } = options;
+  const searchScopeId = `conversation-search-scope-${crypto.randomUUID()}`;
   host.classList.add('conversation-host');
   host.hidden = true;
   host.innerHTML = `<div class="conversation-navigation"><button class="quiet-button conversation-refresh" type="button">최근 대화</button><select class="conversation-turns" aria-label="대화 구간"></select><button class="quiet-button conversation-older" type="button" hidden>이전 구간</button></div>
+    <div class="conversation-search" role="search"><input class="conversation-search-input" type="search" maxlength="256" aria-describedby="${searchScopeId}"/><button class="quiet-button conversation-search-previous" type="button"></button><button class="quiet-button conversation-search-next" type="button"></button><button class="quiet-button conversation-latest" type="button"></button><span class="conversation-search-result" role="status" aria-live="polite"></span></div>
+    <small class="conversation-search-scope" id="${searchScopeId}"></small>
     <div class="conversation-status" role="status" aria-live="polite"></div><small class="conversation-current-settings" aria-live="polite"></small>
     <div class="conversation-messages" role="log" aria-label="대화 내용" tabindex="0"></div>
     <button class="quiet-button conversation-more" type="button" hidden>이전 항목</button>
@@ -39,6 +42,7 @@ export function createConversation(options: ConversationOptions) {
   const effort = $<HTMLSelectElement>('.conversation-effort');
   const turns = $<HTMLSelectElement>('.conversation-turns');
   const messages = $('.conversation-messages');
+  const search = $<HTMLInputElement>('.conversation-search-input');
   const requests = $('.conversation-requests');
   const abort = new AbortController();
   const events = { signal: abort.signal };
@@ -63,6 +67,7 @@ export function createConversation(options: ConversationOptions) {
   let lastSeq = 0; let modelKnown = false; let currentModel = ''; let currentEffort = '';
   let threadId = ''; let modelDraft = false; let effortDraft = false;
   let requestSignature = '';
+  let searchComposing = false; let selectedMatch = ''; let searchQuery = '';
   const rpc = <T = Json>(request: Json) => options.call<T>('conversation_request', { id: options.sessionId, generation: options.generation, request });
   const alive = (version: number) => !disposed && visible && version === epoch;
   function status(ko: string, en = ko) { if (!disposed) bindText($('.conversation-status'), ko, en); }
@@ -81,6 +86,7 @@ export function createConversation(options: ConversationOptions) {
     turns.disabled = !ready; button('.conversation-older').disabled = !ready;
     button('.conversation-more').disabled = !ready;
     button('.conversation-refresh').disabled = !ready || sending;
+    button('.conversation-latest').disabled = !ready || sending;
   }
   function option(select: HTMLSelectElement, value: string, label: string) { select.add(new Option(label, value)); }
   function renderCurrentSettings() {
@@ -137,10 +143,56 @@ export function createConversation(options: ConversationOptions) {
       const pre = document.createElement('pre'); const code = document.createElement('code'); code.textContent = match[1]; pre.append(code);
       const copy = document.createElement('button'); copy.type = 'button'; copy.className = 'quiet-button'; bindText(copy, '코드 복사', 'Copy code');
       // Keep the matched string, not the mutable RegExp result used by the loop.
-      const codeText = match[1]; copy.onclick = () => { void navigator.clipboard.writeText(codeText).then(() => status('코드를 복사했습니다.', 'Code copied.')).catch(failure); };
+      const codeText = match[1]; copy.onclick = () => void copyText(codeText, true);
       block.append(copy, pre); parent.append(block); position = fence.lastIndex;
     }
     if (position < content.length) parent.append(document.createTextNode(content.slice(position)));
+  }
+  async function copyText(text: string, code = false) {
+    if (!visible || !foreground || disposed) return;
+    const version = epoch; const content = contentVersion;
+    try {
+      await navigator.clipboard.writeText(text);
+      if (alive(version) && foreground && content === contentVersion) status(code ? '코드를 복사했습니다.' : '표시된 메시지를 복사했습니다.', code ? 'Code copied.' : 'Displayed message copied.');
+    } catch {
+      if (alive(version) && foreground && content === contentVersion) status('복사하지 못했습니다. 클립보드 권한을 확인하고 다시 시도해 주세요.', 'Could not copy. Check clipboard permission and try again.');
+    }
+  }
+  function displayedText(body: HTMLElement) {
+    // 표시 본문만 사용한다. 코드 복사 버튼과 원문 페이지 이동 문구는 제외한다.
+    return [...body.childNodes].map(node => node.nodeType === Node.TEXT_NODE ? node.textContent ?? ''
+      : node instanceof HTMLElement && node.classList.contains('conversation-code') ? node.querySelector('code')?.textContent ?? '' : '').join('');
+  }
+  function updateSearch() {
+    const query = searchQuery; const matches: string[] = [];
+    // 현재 제한된 행만 순회하며 별도 원문·검색 결과 캐시나 이력 조회를 만들지 않는다.
+    for (const { id } of items) {
+      const row = renderedItems.get(id)!.row;
+      const match = !!query && displayedText(row.querySelector<HTMLElement>('.conversation-content')!).toLocaleLowerCase().includes(query);
+      row.classList.toggle('conversation-search-match', match);
+      if (match) matches.push(id);
+    }
+    if (!matches.includes(selectedMatch)) selectedMatch = '';
+    for (const [id, { row }] of renderedItems) row.classList.toggle('conversation-search-current', id === selectedMatch);
+    const position = matches.indexOf(selectedMatch) + 1;
+    bindText($('.conversation-search-result'), query ? `일치 메시지 ${matches.length}개${position ? ` · ${position}/${matches.length}` : ''}` : '', query ? `${matches.length} matching messages${position ? ` · ${position}/${matches.length}` : ''}` : '');
+    button('.conversation-search-previous').disabled = button('.conversation-search-next').disabled = !matches.length;
+    return matches;
+  }
+  function moveMatch(direction: number) {
+    if (!visible || !foreground || disposed || searchComposing) return;
+    const matches = updateSearch(); if (!matches.length) return;
+    const index = matches.indexOf(selectedMatch);
+    selectedMatch = matches[(index < 0 ? (direction > 0 ? 0 : matches.length - 1) : index + direction + matches.length) % matches.length];
+    const row = renderedItems.get(selectedMatch)!.row;
+    const detail = row.querySelector('details'); if (detail) detail.open = true;
+    updateSearch(); messages.scrollTop += row.getBoundingClientRect().top - messages.getBoundingClientRect().top;
+  }
+  function clearSearch() { search.value = ''; searchQuery = ''; selectedMatch = ''; searchComposing = false; updateSearch(); }
+  async function moveLatest() {
+    const version = epoch; const content = contentVersion;
+    await loadPage();
+    if (alive(version) && foreground && content === contentVersion) messages.scrollTop = messages.scrollHeight;
   }
   function renderItems() {
     const nearEnd = messages.scrollHeight - messages.scrollTop - messages.clientHeight < 80;
@@ -161,6 +213,9 @@ export function createConversation(options: ConversationOptions) {
         detail.append(summary, body); row.append(detail);
       } else row.append(body);
       appendFormatted(body, entry.text);
+      const copy = document.createElement('button'); copy.type = 'button'; copy.className = 'quiet-button conversation-copy-message';
+      bindText(copy, '메시지 복사', 'Copy message'); bindAttribute(copy, 'title', '현재 표시된 본문만 복사합니다.', 'Copy only the currently displayed content.');
+      copy.onclick = () => void copyText(displayedText(body)); row.append(copy);
       if (entry.detail) { const detail = document.createElement('button'); detail.type = 'button'; detail.className = 'quiet-button'; bindText(detail, '전체 내용 보기', 'Read full content'); detail.onclick = () => void loadDetail(entry, body, detail, 0); row.append(detail); }
       if (previous) previous.row.replaceWith(row); else messages.append(row);
       renderedItems.set(entry.id, { signature, row });
@@ -180,6 +235,7 @@ export function createConversation(options: ConversationOptions) {
       messages.append(empty);
     }
     button('.conversation-more').hidden = !nextItems;
+    updateSearch();
     if (nearEnd) messages.scrollTop = messages.scrollHeight;
   }
   async function loadDetail(entry: Entry, body: HTMLElement, control: HTMLButtonElement, offset: number, snapshotId?: string) {
@@ -195,6 +251,7 @@ export function createConversation(options: ConversationOptions) {
       if (typeof value.nextOffset === 'number') { control.disabled = false; bindText(control, '다음 내용', 'Next part'); control.onclick = () => void loadDetail(entry, body, control, value.nextOffset, string(value.snapshotId)); }
       else { control.disabled = false; bindText(control, '처음부터 보기', 'Read from start'); control.onclick = () => void loadDetail(entry, body, control, 0); }
       body.append(pager);
+      updateSearch();
     } catch (error) { if (alive(version)) { failure(error); control.disabled = false; } }
   }
   function itemEntry(value: Json): Entry {
@@ -475,7 +532,7 @@ export function createConversation(options: ConversationOptions) {
   function changeVisibility(value: boolean, handoff: boolean): Promise<void> {
     if (disposed) return Promise.resolve();
     if (visible === value) return changing;
-    visible = value; if (!handoff) host.hidden = !value; const version = ++epoch; stopPolling(); updateControls();
+    visible = value; if (!value) clearSearch(); if (!handoff) host.hidden = !value; const version = ++epoch; stopPolling(); updateControls();
     changing = changing.catch(failure).then(async () => {
       if (attached) {
         try { await rpc({ type: handoff ? 'handoffToTerminal' : 'detach' }); }
@@ -511,6 +568,7 @@ export function createConversation(options: ConversationOptions) {
     if (disposed || foreground === value) return;
     foreground = value; contentVersion++; stopPolling();
     if (!value) {
+      clearSearch();
       clearDisplay();
     } else if (visible && attached) { await loadPage(); startPolling(); }
   }
@@ -523,12 +581,19 @@ export function createConversation(options: ConversationOptions) {
   input.addEventListener('compositionstart', () => { composing = true; }, events);
   input.addEventListener('compositionend', () => { composing = false; }, events);
   input.addEventListener('keydown', event => { if (event.key === 'Enter' && !event.shiftKey && !event.isComposing && !composing && event.keyCode !== 229) { event.preventDefault(); void send(); } }, events);
+  search.addEventListener('input', () => { if (!searchComposing) { searchQuery = search.value.trim().toLocaleLowerCase(); selectedMatch = ''; updateSearch(); } }, events);
+  search.addEventListener('compositionstart', () => { searchComposing = true; }, events);
+  search.addEventListener('compositionend', () => { searchComposing = false; searchQuery = search.value.trim().toLocaleLowerCase(); selectedMatch = ''; updateSearch(); }, events);
+  search.addEventListener('keydown', event => { if (event.key === 'Enter' && !event.isComposing && !searchComposing && event.keyCode !== 229) { event.preventDefault(); moveMatch(event.shiftKey ? -1 : 1); } }, events);
   input.addEventListener('paste', event => { const files = [...(event.clipboardData?.files ?? [])]; if (files.length) { event.preventDefault(); void stageFiles(files); } }, events);
   host.addEventListener('dragover', event => { if (event.dataTransfer?.types.includes('Files')) { event.preventDefault(); event.stopPropagation(); } }, events);
   host.addEventListener('drop', event => { const files = [...(event.dataTransfer?.files ?? [])]; if (files.length) { event.preventDefault(); event.stopPropagation(); void stageFiles(files); } }, events);
   button('.conversation-stop').addEventListener('click', () => void interrupt(), events);
   button('.conversation-attach').addEventListener('click', () => void pickAttachments(), events);
   button('.conversation-refresh').addEventListener('click', () => { button('.conversation-refresh').classList.remove('needs-refresh'); void loadPage(); }, events);
+  button('.conversation-search-previous').addEventListener('click', () => moveMatch(-1), events);
+  button('.conversation-search-next').addEventListener('click', () => moveMatch(1), events);
+  button('.conversation-latest').addEventListener('click', () => void moveLatest(), events);
   button('.conversation-older').addEventListener('click', () => void loadPage(nextTurns), events);
   button('.conversation-more').addEventListener('click', () => void loadItems(selectedTurn, nextItems), events);
   button('.conversation-models-more').addEventListener('click', () => void loadModels(nextModels), events);
@@ -536,10 +601,13 @@ export function createConversation(options: ConversationOptions) {
   model.addEventListener('change', () => { modelDraft = true; effortDraft = false; renderEfforts(); }, events);
   effort.addEventListener('change', () => { modelDraft = true; effortDraft = true; }, events);
   const labels: [string, string, string][] = [
+    ['.conversation-search-previous', '이전 일치', 'Previous match'], ['.conversation-search-next', '다음 일치', 'Next match'], ['.conversation-latest', '최신으로 이동', 'Go to latest'],
+    ['.conversation-search-scope', '현재 표시 구간의 일부 메시지·미리보기만 검색합니다. 전체 대화 검색이 아니며, 원문을 더 불러오지 않습니다.', 'Search only the messages and previews in the displayed section, a sample of this conversation. This is not a full-conversation search and does not load more content.'],
     ['.conversation-refresh', '최근 대화', 'Recent conversation'], ['.conversation-older', '이전 구간', 'Earlier turns'], ['.conversation-more', '이전 항목', 'Earlier items'], ['.conversation-attach', '+ 첨부', '+ Attach'], ['.conversation-model-label', '다음 전송 모델', 'Next message model'], ['.conversation-effort-label', '다음 전송 추론', 'Next message reasoning'], ['.conversation-models-more', '모델 더 보기', 'More models'], ['.conversation-stop', '중단', 'Stop'], ['.conversation-send', '전송', 'Send'], ['.conversation-hint', 'Enter 전송 · Shift+Enter 줄바꿈 · 초안은 이 세션에만 유지됩니다.', 'Enter to send · Shift+Enter for a new line · Draft stays in this session.'],
   ];
   for (const [selector, ko, en] of labels) bindText($(selector), ko, en);
   bindAttribute(input, 'aria-label', '메시지', 'Message'); bindAttribute(input, 'placeholder', '메시지 입력 · Shift+Enter 줄바꿈', 'Message · Shift+Enter for a new line');
+  bindAttribute(search, 'aria-label', '표시된 대화 검색', 'Search displayed conversation'); bindAttribute(search, 'placeholder', '표시 구간 검색', 'Search displayed section');
   for (const [element, ko, en] of [[model, '모델', 'Model'], [effort, '추론 수준', 'Reasoning effort'], [turns, '대화 구간', 'Conversation turns'], [messages, '대화 내용', 'Conversation'], [$('.conversation-attachments'), '첨부 파일', 'Attachments']] as const) bindAttribute(element, 'aria-label', ko, en);
   const unlanguage = onLanguageChange(() => { requestSignature = ''; renderedItems.clear(); messages.replaceChildren(); renderModels(); renderTurns(); renderItems(); renderRequests(); renderAttachments(); });
   renderCurrentSettings(); renderModels(); renderItems(); updateControls();
@@ -556,6 +624,7 @@ export function createConversation(options: ConversationOptions) {
       if (!sessionEnded) { await setVisible(false); if (attached) await rpc({ type: 'detach' }); }
       if (attached) { attached = false; options.ownerChanged?.(false); }
       visible = false; disposed = true; epoch++; contentVersion++; stopPolling(); abort.abort(); unlanguage();
+      search.value = ''; searchQuery = ''; selectedMatch = ''; searchComposing = false;
       input.value = ''; attachments = []; stagedPaths.clear(); responding.clear(); questionDrafts.clear(); renderedItems.clear(); items = []; turnPage = []; models = []; pendingRequests = []; host.replaceChildren();
     },
   };

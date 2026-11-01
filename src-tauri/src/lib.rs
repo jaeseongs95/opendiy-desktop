@@ -102,6 +102,12 @@ async fn get_codex_settings(engine: State<'_, Engine>) -> Result<codex_settings:
     tauri::async_runtime::spawn_blocking(move || engine.get_codex_settings()).await.map_err(|e| format!("Read executable setting worker: {e}"))?
 }
 #[tauri::command]
+async fn runtime_compatibility(engine: State<'_, Engine>) -> Result<codex::RuntimeCompatibility, String> {
+    let engine = engine.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || engine.runtime_compatibility()).await.map_err(|e| format!("호환성 조회 작업자: {e}"))?
+}
+
+#[tauri::command]
 async fn set_codex_executable(engine: State<'_, Engine>, path: Option<String>) -> Result<codex_settings::CodexSettings, String> {
     let engine = engine.inner().clone();
     tauri::async_runtime::spawn_blocking(move || engine.set_codex_executable(path.as_deref())).await.map_err(|e| format!("Save executable setting worker: {e}"))?
@@ -242,6 +248,12 @@ async fn choose_conversation_attachments(app: tauri::AppHandle, engine: State<'_
     tauri::async_runtime::spawn_blocking(move || attachments.choose(owner,language)).await.map_err(|e|format!("첨부 선택 작업자: {e}"))?
 }
 #[tauri::command]
+async fn conversation_attachment_storage(engine: State<'_, Engine>) -> Result<conversation_attachments::AttachmentStorageUsage, String> {
+    let attachments = engine.conversation_attachments();
+    tauri::async_runtime::spawn_blocking(move || attachments.storage_usage()).await.map_err(|e| format!("첨부 저장 공간 조회 작업자: {e}"))?
+}
+
+#[tauri::command]
 async fn stage_conversation_image(engine: State<'_, Engine>, id: String, generation: u64, data_url: String) -> Result<conversation_attachments::ConversationAttachment,String> {
     let engine = engine.inner().clone();
     tauri::async_runtime::spawn_blocking(move || engine.stage_conversation_image(&id,generation,&data_url)).await.map_err(|e|format!("첨부 이미지 준비 작업자: {e}"))?
@@ -335,7 +347,7 @@ pub fn run() {
             tray.build(app)?;
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![get_ui_language, set_ui_language, prepare_runtime, start_session, list_sessions, session_write, session_resize, session_stop, session_output_ack, load_layout, save_layout, list_external, list_projects, import_project, create_project, rename_project, set_project_favorite, delete_project, move_session_to_project, choose_project_folder, choose_project, catalog_list, catalog_preview, get_codex_settings, set_codex_executable, choose_codex_executable, extensions_list, extensions_mutate, choose_skill_folder, mobile_control, cron_request, subagents_request, conversation_request, list_pending_questions, respond_pending_question, choose_conversation_attachments, stage_conversation_image, cleanup_conversation_attachment, weekly_usage, unconfirmed_exit_available, complete_exit])
+        .invoke_handler(tauri::generate_handler![get_ui_language, set_ui_language, prepare_runtime, start_session, list_sessions, session_write, session_resize, session_stop, session_output_ack, load_layout, save_layout, list_external, list_projects, import_project, create_project, rename_project, set_project_favorite, delete_project, move_session_to_project, choose_project_folder, choose_project, catalog_list, catalog_preview, get_codex_settings, runtime_compatibility, set_codex_executable, choose_codex_executable, extensions_list, extensions_mutate, choose_skill_folder, mobile_control, cron_request, subagents_request, conversation_request, list_pending_questions, respond_pending_question, choose_conversation_attachments, conversation_attachment_storage, stage_conversation_image, cleanup_conversation_attachment, weekly_usage, unconfirmed_exit_available, complete_exit])
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                 if !window.state::<ExitState>().0.load(Ordering::Acquire) {

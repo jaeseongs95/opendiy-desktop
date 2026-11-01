@@ -807,3 +807,141 @@ test('스트리밍 동안 위로 읽는 위치를 유지하고 하단에 있으�
   await expect(view(page).locator('[data-item-id="tail-item"]')).toContainText('추가 출력');
   await expect.poll(() => messages.evaluate(node => node.scrollHeight - node.scrollTop - node.clientHeight)).toBeLessThanOrEqual(1);
 });
+
+test('검색은 표시된 표본만 검사하며 본문·코드·접힌 도구를 화면 순서로 이동한다', async ({ page }) => {
+  await conversation(page);
+  const search = view(page).locator('.conversation-search-input');
+  await expect(view(page).locator('.conversation-search-scope')).toContainText('전체 대화 검색이 아니며');
+  await page.evaluate(() => {
+    const f = (window as any).conversationFixture;
+    f.queue.push({ seq: f.nextSeq++, method: 'item/completed', params: { turnId: 'recent-turn', item: { id: 'search-tail', type: 'agentMessage', text: 'SAFE 마지막 일치' } } });
+  });
+  await expect(view(page).locator('[data-item-id="search-tail"]')).toHaveCount(1);
+  const historyReads = () => page.evaluate(() => (window as any).conversationFixture.calls.filter((entry: any) => ['page', 'items', 'detail'].includes(entry.args.request?.type)).length);
+  const before = await historyReads();
+  await search.fill('safe');
+  await expect(view(page).locator('.conversation-search-result')).toHaveText('일치 메시지 2개');
+  await search.press('Enter');
+  await expect(view(page).locator('.conversation-search-current')).toHaveAttribute('data-item-id', 'assistant-a');
+  await view(page).locator('.conversation-search-next').click();
+  await expect(view(page).locator('.conversation-search-current')).toHaveAttribute('data-item-id', 'search-tail');
+  await search.press('Shift+Enter');
+  await expect(view(page).locator('.conversation-search-current')).toHaveAttribute('data-item-id', 'assistant-a');
+  await view(page).locator('.conversation-search-previous').click();
+  await expect(view(page).locator('.conversation-search-current')).toHaveAttribute('data-item-id', 'search-tail');
+  await search.fill('검사 성공'); await search.press('Enter');
+  await expect(view(page).locator('[data-item-id="tool-a"] details')).toHaveAttribute('open', '');
+  await search.fill('코드 복사');
+  await expect(view(page).locator('.conversation-search-result')).toHaveText('일치 메시지 0개');
+  await expect(view(page).locator('.conversation-search-next')).toBeDisabled();
+  expect(await historyReads()).toBe(before);
+  await page.evaluate(async () => { const { setLanguage } = await import('/src/i18n.ts'); setLanguage('en'); });
+  await expect(search).toHaveAttribute('aria-label', 'Search displayed conversation');
+  await expect(view(page).locator('.conversation-search-scope')).toContainText('a sample');
+  await expect(view(page).locator('.conversation-search-result')).toHaveText('0 matching messages');
+  await expect(view(page).getByRole('button', { name: 'Copy message', exact: true })).toHaveCount(4);
+});
+
+test('검색 조합 입력·실시간 갱신은 작성 초안과 스크롤을 보존하고 종료 후에만 검색한다', async ({ page }) => {
+  await conversation(page);
+  await view(page).locator('.conversation-input').fill('보존할 작성 초안');
+  await page.evaluate(() => { const f = (window as any).conversationFixture; f.queue.push({ seq: f.nextSeq++, method: 'item/agentMessage/delta', params: { turnId: 'recent-turn', itemId: 'assistant-a', delta: '\n' + '검색 전 내용\n'.repeat(160) } }); });
+  await expect(view(page).locator('[data-item-id="assistant-a"]')).toContainText('검색 전 내용');
+  const messages = view(page).locator('.conversation-messages');
+  await messages.evaluate(node => { node.scrollTop = 0; });
+  const search = view(page).locator('.conversation-search-input');
+  await search.fill('없는 문자열');
+  await search.evaluate(node => {
+    node.dispatchEvent(new CompositionEvent('compositionstart', { bubbles: true }));
+    (node as HTMLInputElement).value = '검사'; node.dispatchEvent(new InputEvent('input', { bubbles: true, isComposing: true }));
+    node.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', keyCode: 229, isComposing: true, bubbles: true }));
+  });
+  await page.evaluate(() => { const f = (window as any).conversationFixture; f.queue.push({ seq: f.nextSeq++, method: 'item/agentMessage/delta', params: { turnId: 'recent-turn', itemId: 'assistant-a', delta: '추가 갱신' } }); });
+  await expect(view(page).locator('[data-item-id="assistant-a"]')).toContainText('추가 갱신');
+  await expect(view(page).locator('.conversation-search-result')).toHaveText('일치 메시지 0개');
+  await expect(view(page).locator('.conversation-search-current')).toHaveCount(0);
+  await search.evaluate(node => node.dispatchEvent(new CompositionEvent('compositionend', { bubbles: true })));
+  await expect(view(page).locator('.conversation-search-result')).toHaveText('일치 메시지 1개');
+  expect(await messages.evaluate(node => node.scrollTop)).toBeLessThanOrEqual(1);
+  await expect(view(page).locator('.conversation-input')).toHaveValue('보존할 작성 초안');
+  expect(await page.evaluate(() => (window as any).conversationFixture.calls.filter((entry: any) => entry.args.request?.type === 'send').length)).toBe(0);
+});
+
+test('이력 이동은 검색 표본을 교체하며 최신 이동은 최근 구간 끝으로 돌아간다', async ({ page }) => {
+  await conversation(page);
+  const search = view(page).locator('.conversation-search-input');
+  await search.fill('이전 페이지');
+  await expect(view(page).locator('.conversation-search-result')).toHaveText('일치 메시지 0개');
+  await view(page).locator('.conversation-more').click();
+  await expect(view(page).locator('.conversation-search-result')).toHaveText('일치 메시지 1개');
+  await expect(view(page).locator('.conversation-message')).toHaveCount(1);
+  await search.press('Enter');
+  await view(page).locator('.conversation-older').click();
+  await expect(view(page).locator('.conversation-turns')).toHaveValue('older-turn');
+  await expect(view(page).locator('.conversation-search-result')).toHaveText('일치 메시지 0개');
+  await view(page).locator('.conversation-latest').click();
+  await expect(view(page).locator('.conversation-turns')).toHaveValue('recent-turn');
+  await expect(view(page).locator('[data-item-id="assistant-a"]')).toHaveCount(1);
+  await expect.poll(() => view(page).locator('.conversation-messages').evaluate(node => node.scrollHeight - node.scrollTop - node.clientHeight)).toBeLessThanOrEqual(1);
+});
+
+test('메시지 복사는 표시된 본문만 사용하고 원문 페이지와 기존 코드 복사를 지원한다', async ({ page }) => {
+  await conversation(page);
+  await page.evaluate(() => { (window as any).copiedMessages = []; Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText: async (text: string) => { (window as any).copiedMessages.push(text); } } }); });
+  await view(page).locator('[data-item-id="assistant-a"] .conversation-copy-message').click();
+  await expect(view(page).locator('.conversation-status')).toHaveText('표시된 메시지를 복사했습니다.');
+  expect(await page.evaluate(() => (window as any).copiedMessages)).toEqual(['답변\nconst safe = true;\n']);
+  await view(page).locator('[data-item-id="assistant-a"]').getByRole('button', { name: '코드 복사', exact: true }).click();
+  expect(await page.evaluate(() => (window as any).copiedMessages.at(-1))).toBe('const safe = true;\n');
+  await page.evaluate(() => { (window as any).conversationFixture.largeHistory = true; });
+  await view(page).locator('.conversation-refresh').click();
+  const detail = view(page).locator('[data-item-id="large-item"]');
+  const search = view(page).locator('.conversation-search-input');
+  await search.fill('첫 원문');
+  await expect(view(page).locator('.conversation-search-result')).toHaveText('일치 메시지 0개');
+  expect(await page.evaluate(() => (window as any).conversationFixture.detailReads)).toBe(0);
+  await detail.getByRole('button', { name: '전체 내용 보기', exact: true }).click();
+  await expect(view(page).locator('.conversation-search-result')).toHaveText('일치 메시지 1개');
+  await detail.locator('.conversation-copy-message').click();
+  expect(await page.evaluate(() => (window as any).copiedMessages.at(-1))).toBe('첫 원문');
+  await detail.getByRole('button', { name: '다음 내용', exact: true }).click();
+  await expect(view(page).locator('.conversation-search-result')).toHaveText('일치 메시지 0개');
+  await detail.locator('.conversation-copy-message').click();
+  expect(await page.evaluate(() => (window as any).copiedMessages.at(-1))).toBe('마지막 원문');
+});
+
+test('복사 실패를 알리고 숨김·뒤로 전환·폐기 후 검색과 늦은 복사 응답을 해제한다', async ({ page }) => {
+  await conversation(page);
+  await page.evaluate(() => { Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText: async () => { throw Error('비공개 클립보드 오류'); } } }); });
+  await view(page).locator('[data-item-id="assistant-a"] .conversation-copy-message').click();
+  await expect(view(page).locator('.conversation-status')).toHaveText('복사하지 못했습니다. 클립보드 권한을 확인하고 다시 시도해 주세요.');
+  await page.evaluate(() => {
+    const state = window as any; state.clipboardWrites = 0;
+    Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText: () => { state.clipboardWrites++; return new Promise<void>(resolve => { state.resolveCopy = resolve; }); } } });
+    state.detachedCopyButton = document.querySelector('#conversation-fixture [data-item-id="assistant-a"] .conversation-copy-message');
+  });
+  await view(page).locator('.conversation-search-input').fill('safe');
+  await view(page).locator('[data-item-id="assistant-a"] .conversation-copy-message').click();
+  await page.evaluate(async () => {
+    const state = window as any; await state.conversation.setVisible(false);
+    state.hiddenStatus = document.querySelector('#conversation-fixture .conversation-status')!.textContent;
+    state.resolveCopy(); await Promise.resolve();
+  });
+  await expect(view(page).locator('.conversation-search-input')).toHaveValue('');
+  await expect(view(page).locator('.conversation-search-match')).toHaveCount(0);
+  await expect(view(page).locator('.conversation-message')).toHaveCount(0);
+  expect(await view(page).locator('.conversation-status').textContent()).toBe(await page.evaluate(() => (window as any).hiddenStatus));
+  await page.evaluate(async () => { await (window as any).conversation.setVisible(true); });
+  await view(page).locator('[data-item-id="assistant-a"] .conversation-copy-message').click();
+  await page.evaluate(async () => {
+    const state = window as any; await state.conversation.setForeground(false);
+    state.backgroundStatus = document.querySelector('#conversation-fixture .conversation-status')!.textContent;
+    state.resolveCopy(); await Promise.resolve();
+  });
+  await expect(view(page).locator('.conversation-message')).toHaveCount(0);
+  await expect(view(page).locator('.conversation-search-input')).toHaveValue('');
+  expect(await view(page).locator('.conversation-status').textContent()).toBe(await page.evaluate(() => (window as any).backgroundStatus));
+  await page.evaluate(async () => { const state = window as any; await state.conversation.dispose(); state.detachedCopyButton.click(); });
+  await expect(view(page).locator('*')).toHaveCount(0);
+  expect(await page.evaluate(() => (window as any).clipboardWrites)).toBe(2);
+});

@@ -1,0 +1,9 @@
+#attachment-storage-dialog { width: min(680px, calc(100vw - 40px)); max-height: calc(100vh - 40px); overflow-y: auto; }
+#attachment-storage-dialog h2 { margin: 0; }
+#attachment-storage-dialog p { overflow-wrap: anywhere; }
+#attachment-storage-summary dl { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.3fr); gap: 10px 16px; }
+#attachment-storage-summary dd { margin: 0; overflow-wrap: anywhere; }
+#attachment-storage-drafts { max-height: 180px; overflow-y: auto; padding-inline-start: 24px; }
+#attachment-storage-drafts li { overflow-wrap: anywhere; margin-block: 8px; }
+#attachment-storage-guidance, #attachment-storage-preservation { font-size: 13px; line-height: 1.6; }
+@media (max-width: 520px) { #attachment-storage-summary dl { grid-template-columns: minmax(0, 1fr); gap: 6px; } #attachment-storage-summary dd { margin-bottom: 10px; } }

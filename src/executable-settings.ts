@@ -1,3 +1,4 @@
+import { createRuntimeCompatibility } from './runtime-compatibility';
 import { onLanguageChange, t } from './i18n';
 
 interface CodexSettings {
@@ -22,6 +23,8 @@ export function createExecutableSettings(call: <T>(command: string, args?: Recor
     <div id="codex-settings-status" role="status" aria-live="polite"></div>
     <div id="codex-settings-error" class="inline-error" role="alert" hidden></div>
     <div class="dialog-actions"><button id="codex-executable-reset" class="quiet-button">자동 찾기로 변경</button><button id="codex-executable-choose" class="primary-button">실행 파일 선택…</button></div>`;
+  const compatibility = createRuntimeCompatibility(call);
+  dialog.querySelector('.executable-help')!.after(compatibility.element);
   document.body.append(dialog);
   const $ = <T extends HTMLElement>(selector: string) => dialog.querySelector<T>(selector)!;
   const choose = $<HTMLButtonElement>('#codex-executable-choose');
@@ -66,6 +69,7 @@ export function createExecutableSettings(call: <T>(command: string, args?: Recor
     error.textContent = value instanceof Error ? value.message : String(value); error.hidden = false;
   }
   function show(settings: CodexSettings) {
+    compatibility.invalidate();
     path.value = settings.savedPath ?? '';
     placeholder('자동 찾기 사용 중', 'Using automatic discovery');
     text($('#codex-executable-resolved'), settings.resolvedPath ?? '사용 가능한 실행 파일이 없습니다', settings.resolvedPath ?? 'No executable available');
@@ -88,11 +92,12 @@ export function createExecutableSettings(call: <T>(command: string, args?: Recor
   choose.onclick = () => void change('choose_codex_executable');
   reset.onclick = () => void change('set_codex_executable', { path: null });
   $('#codex-settings-close').onclick = () => dialog.close();
-  dialog.onclose = () => { version++; };
+  dialog.onclose = () => { version++; compatibility.invalidate(); };
   return {
     async open() {
       if (dialog.open) return;
       const token = ++version;
+      compatibility.invalidate();
       path.value = '';
       placeholder('확인 중…', 'Checking…');
       text($('#codex-executable-resolved'), '확인 중…', 'Checking…');

@@ -46,6 +46,11 @@ pub(crate) fn prepare_runtime_with_executable(exe: &OsString, cancelled: &Arc<At
     shared::prepare_runtime(exe, &cwd, cancelled)
 }
 
+#[path = "codex_runtime.rs"]
+mod runtime;
+pub use runtime::RuntimeCompatibility;
+pub(crate) use runtime::inspect as inspect_runtime;
+
 #[path = "codex_conversation.rs"]
 mod conversation;
 pub use conversation::{ConversationConnection, ConversationRequest, SubagentRequest};

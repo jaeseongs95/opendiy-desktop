@@ -147,6 +147,12 @@ and setting changes use its app-server APIs. Existing CLI authentication and
 configuration remain owned by that CLI. Changes are read back after applying.
 Start a new session to use changed extensions; running terminals are not restarted.
 
+## Runtime compatibility and attachment storage
+
+Use **Settings → Executable settings → Check compatibility** to compare the selected executable version with the current shared-server version and inspect declared subagent, safe compaction and exact-turn interruption support. This query does not install, start or replace a server. Selecting an executable does not update an already running server. Each feature also checks the actual session permissions and task state.
+
+Use **Settings → Attachment storage** to inspect app-owned image usage and limits, distinguishing current-process unsent drafts, retained images and other files such as those from previous runs. Original local files are excluded. Remove draft attachments in their original session to free space. Submitted images, uncertain sends and files with unknown ownership are preserved.
+
 ## Mobile remote control
 
 Open **⚙ Settings** in the upper-right corner, then **Mobile remote control**,
@@ -313,6 +319,8 @@ Older servers show a capability limitation; the app does not fall back to operat
 queued work or merge a new message into an active turn. Terminal view remains available. Weekly
 usage also reads only through an existing shared server; unavailable reads preserve the last
 confirmed value and observation time.
+
+Displayed-section search checks only the messages and previews already shown, without loading the full conversation. Move between matching messages or return to the latest section. Message copy includes only the displayed content; manually load another slice of large content to search or copy it.
 
 The composer supports multiline text, Korean composition, pasted images and native file selection.
 Ordinary files are local references, not the ChatGPT document upload service. Model and reasoning
