@@ -147,6 +147,18 @@ and setting changes use its app-server APIs. Existing CLI authentication and
 configuration remain owned by that CLI. Changes are read back after applying.
 Start a new session to use changed extensions; running terminals are not restarted.
 
+## Runtime combinations and verification status
+
+Version numbers alone do not guarantee compatibility. The selected CLI and an already running shared server may come from different builds. Check the actual server declarations together with the scope below.
+
+| Desktop | Codex CLI | App server | Actual integration scope and limitations |
+| --- | --- | --- | --- |
+| v0.6.0 release candidate, [deba0725](https://github.com/jaeseongs95/opendiy-desktop/commit/deba0725ea7420e84e95ab569c9a3534e67fa2c1) | Released R30, `1cacc86` | Released R30 artifact: `86cf681`; identity with the server in the limited test is unconfirmed | Four native steps checked only the unsupported-subagent-management boundary (run `b807b535`). This is not a complete integration pass for the combination. |
+| Same v0.6.0 release candidate | R31 development candidate, `e8a1d84` | Same R31 development candidate; final package identity pending | Protocol contracts were compared. Joint tests with the final executables remain pending. Requires shared-server/proxy support and the relevant feature declarations. |
+| Follow-up branch, [6929409](https://github.com/jaeseongs95/opendiy-desktop/commit/69294093d92ccdb859280009c5a2d340d54f0372) | Same R31 development candidate | Same R31 development candidate | Passed 70 affected browser tests and a separate code review. Joint tests with the actual CLI/server combination remain pending. Diagnostics do not initialize a connection, resume a session or change the server; unobserved support remains unknown. |
+
+See the [R30 release](https://github.com/jaeseongs95/opendiy-codex/releases/tag/v0.165.0-r30.20261101) and [OpenDIY Codex runtime documentation](https://github.com/jaeseongs95/opendiy-codex). R31 had not been handed off as a final package when this table was written; these development commits are not presented as verified stable distributions. Updating a server is separate from choosing an executable and may affect ongoing sessions.
+
 ## Runtime compatibility and attachment storage
 
 Use **Settings → Executable settings → Check compatibility** to compare the selected executable version with the current shared-server version and inspect declared subagent, safe compaction and exact-turn interruption support. Feature declarations are reused only from existing open sessions connected to the same server; unobserved features remain unknown. Compaction is checked separately by a passive session subscription and stays unknown in this diagnostic. Checking does not initialize a diagnostic connection or resume a session. This query does not install, start or replace a server. Selecting an executable does not update an already running server. Each feature also checks the actual session permissions and task state.
