@@ -199,16 +199,28 @@ fn compatibility_reuses_only_live_same_executable_and_socket_declarations_withou
     let exe = OsString::from("fixture.exe");
     let endpoint = SharedEndpoint { exe: exe.clone(), socket: socket.clone(), stamp: socket_stamp(&socket).unwrap() };
     let stopped = Arc::new(AtomicBool::new(false));
-    let control = SharedControl { endpoint, thread_id: "own-fixture".into(), cwd: directory.clone(), stopped: stopped.clone(), capabilities: super::super::runtime::observed_capabilities(&json!({"supportsSubagentManagement":true,"supportsExpectedTurnInterrupt":false})) };
-    let status = json!({"status":"running","socketPath":socket,"appServerVersion":"fixture"});
-    assert!(control.observed_capabilities(&exe, &status).unwrap().is_some());
-    assert!(control.observed_capabilities(&OsString::from("different.exe"), &status).unwrap().is_none());
+    let initialized = json!({"userAgent":"fixture-origin/1.2.3 (Linux 6.8.0; x86_64) fixture-client/9.0","supportsSubagentManagement":true,"supportsExpectedTurnInterrupt":false});
+    let control = SharedControl { endpoint, thread_id: "own-fixture".into(), cwd: directory.clone(), stopped: stopped.clone(), capabilities: super::super::runtime::observed_capabilities(&initialized) };
+    assert_eq!(control.observed_capabilities(&exe).unwrap(), Some(super::super::runtime::observed_capabilities(&initialized).unwrap()));
+    // 이미 받은 선언만 보존하며 서버 재조회 없이 누락과 잘못된 값을 구별한다.
+    for response in [json!({}), json!({"userAgent":"different-origin/2.0"})] {
+        let mut cached = control.clone(); cached.capabilities = super::super::runtime::observed_capabilities(&response);
+        assert_eq!(cached.observed_capabilities(&exe).unwrap(), Some(super::super::runtime::observed_capabilities(&response).unwrap()));
+    }
+    for response in [json!({"userAgent":null}), json!({"userAgent":42}), json!({"userAgent":"invalid"}),
+        json!({"userAgent":"origin/"}), json!({"userAgent":"origin/1.2.3\nextra"}),
+        json!({"userAgent":format!("origin/{}", "v".repeat(257))}),
+        json!({"supportsSubagentManagement":"true"}), json!({"supportsExpectedTurnInterrupt":null})] {
+        let mut invalid = control.clone(); invalid.capabilities = super::super::runtime::observed_capabilities(&response);
+        assert!(invalid.observed_capabilities(&exe).is_err(), "{response}");
+    }
+    assert!(control.observed_capabilities(&OsString::from("different.exe")).unwrap().is_none());
     stopped.store(true, Ordering::Release);
-    assert!(control.observed_capabilities(&exe, &status).unwrap().is_none());
+    assert!(control.observed_capabilities(&exe).unwrap().is_none());
     stopped.store(false, Ordering::Release);
     fs::write(&socket, b"replacement with different metadata").unwrap();
     // 변경 시각 정밀도가 낮아도 명시적으로 다른 stamp를 주입해 재사용 차단을 검사한다.
     let mut replaced = control.clone(); replaced.endpoint.stamp.modified = Some(SystemTime::UNIX_EPOCH);
-    assert!(replaced.observed_capabilities(&exe, &status).unwrap().is_none());
+    assert!(replaced.observed_capabilities(&exe).unwrap().is_none());
     fs::remove_file(&socket).unwrap(); fs::remove_dir(&directory).unwrap();
 }

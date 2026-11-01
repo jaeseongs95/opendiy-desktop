@@ -26,14 +26,14 @@ test('선택 명령줄과 다음 시작 서버와 실행 중 서버의 경로·�
   await page.locator('.compatibility-refresh').click();
   await expect(page.locator('.compatibility-details')).toContainText('codex-cli 0.2.0');
   await expect(page.locator('.compatibility-details')).toContainText('0.1.0');
-  await expect(page.locator('.compatibility-details dt')).toHaveText(['선택한 명령줄 실행 파일','선택한 명령줄 버전','다음 시작에 선택된 서버 실행 파일','다음 시작에 선택된 서버 버전','실제 실행 중인 서버 실행 파일','실제 실행 중인 서버 보고 버전','서브에이전트 관리','안전한 유휴 압축','지정 작업만 중단']);
+  await expect(page.locator('.compatibility-details dt')).toHaveText(['선택한 명령줄 실행 파일','선택한 명령줄 버전','다음 시작에 선택된 서버 실행 파일','다음 시작에 선택된 서버 버전','실제 실행 중인 서버 실행 파일','기존 연결에서 보고한 서버 버전','서브에이전트 관리','안전한 유휴 압축','지정 작업만 중단']);
   await expect(page.locator('.compatibility-details dd')).toHaveText(['D:\\tools\\codex.exe','codex-cli 0.2.0','D:\\next\\codex-server.exe','0.3.0','미확인','0.1.0','지원되지 않음','미확인','미확인']);
   await expect(page.locator('.compatibility-help')).toContainText('실행 중인 서버는 바뀌지');
   await expect(page.locator('.compatibility-scope')).toContainText('버전이 같아도 출처·파일 해시·실행 세대를 확인하기 전에는 같은 패키지로 확정하지 않습니다');
   await page.locator('#codex-settings-close').click();
   await page.locator('#language-select').selectOption('en');
   await page.locator('#codex-settings-open').click(); await page.locator('.compatibility-refresh').click();
-  await expect(page.locator('.compatibility-details dt')).toHaveText(['Selected CLI executable','Selected CLI version','Server executable selected for next start','Server version selected for next start','Actually running server executable','Actually running server reported version','Subagent management','Safe idle compaction','Interrupt exact turn']);
+  await expect(page.locator('.compatibility-details dt')).toHaveText(['Selected CLI executable','Selected CLI version','Server executable selected for next start','Server version selected for next start','Actually running server executable','Server version reported by existing connections','Subagent management','Safe idle compaction','Interrupt exact turn']);
   await expect(page.locator('.compatibility-details dd')).toHaveText(['D:\\tools\\codex.exe','codex-cli 0.2.0','D:\\next\\codex-server.exe','0.3.0','Unknown','0.1.0','Not supported','Unknown','Unknown']);
   await expect(page.locator('.compatibility-scope')).toContainText('Matching versions do not confirm the same package');
   await expect(page.locator('.compatibility-details')).toContainText('Not supported');
@@ -118,4 +118,14 @@ test('조회 대기 중 언어 변경은 추가 조회 없이 단일 미결 조�
   await page.evaluate(() => (window as any).compatibilityFixture.release());
   await expect(page.locator('.compatibility-details dd')).toHaveText(['D:\\tools\\codex.exe','codex-cli 0.2.0','D:\\next\\codex-server.exe','0.3.0','Unknown','0.1.0','Not supported','Unknown','Unknown']);
   await expect(page.locator('.compatibility-refresh')).toBeEnabled();
+});
+
+ test('기존 연결의 보고 버전은 현재 서버 연결 성공으로 표시하지 않는다', async ({page}) => {
+  await openSettings(page);
+  await page.evaluate(() => { Object.assign((window as any).compatibilityFixture.reply, { serverState: 'unavailable', selectedServerExecutable: null, selectedServerVersion: null, serverVersion: 'observed-v1' }); });
+  await page.locator('.compatibility-refresh').click();
+  await expect(page.locator('.compatibility-status')).toContainText('추가 연결 없이 기존 관측 정보만 표시');
+  await expect(page.locator('.compatibility-details dd').nth(5)).toHaveText('observed-v1');
+  await expect(page.locator('.compatibility-help')).toContainText('현재 실행 상태를 다시 확인한 값이 아닙니다');
+  await expect(page.locator('.compatibility-scope')).toContainText('서버에 새로 연결하지 않습니다');
 });

@@ -173,8 +173,8 @@ pub(crate) struct SharedControl {
     stopped: Arc<AtomicBool>,
 }
 impl SharedControl {
-    pub(super) fn observed_capabilities(&self, exe: &OsString, value: &Value) -> Result<Option<super::runtime::RuntimeCapabilities>, String> {
-        if self.stopped.load(Ordering::Acquire) || &self.endpoint.exe != exe || self.endpoint.socket != lifecycle_socket(value)? { return Ok(None); }
+    pub(super) fn observed_capabilities(&self, exe: &OsString) -> Result<Option<super::runtime::RuntimeCapabilities>, String> {
+        if self.stopped.load(Ordering::Acquire) || &self.endpoint.exe != exe { return Ok(None); }
         // 서버 교체 전 선언을 현재 서버의 선언으로 잘못 재사용하지 않는다.
         if socket_stamp(&self.endpoint.socket)? != self.endpoint.stamp { return Ok(None); }
         self.capabilities.clone().map(Some)
