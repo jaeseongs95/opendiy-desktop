@@ -68,7 +68,20 @@ async function workspace(page: Page, options: { hold?: boolean; fail?: number; h
       },
     };
   }, { options, savedSessions });
-  await page.goto('/');
+  const failedResources: string[] = [];
+  const onRequestFailed = (request: import('@playwright/test').Request) => {
+    if (['document', 'script', 'stylesheet'].includes(request.resourceType())) {
+      failedResources.push(`${request.url()}: ${request.failure()?.errorText ?? 'unknown error'}`);
+    }
+  };
+  page.on('requestfailed', onRequestFailed);
+  try {
+    await page.goto('/');
+    if (failedResources.length) throw new Error(`Application bootstrap resource failed: ${failedResources.join('; ')}`);
+    await expect(page.locator('#settings-open'), 'Application markup must load before runtime assertions').toBeAttached();
+  } finally {
+    page.off('requestfailed', onRequestFailed);
+  }
 }
 
 const calls = (page: Page, command: string) => page.evaluate(command => (window as any).startupFixture.calls.filter((item: any) => item.command === command), command);
@@ -84,6 +97,12 @@ async function selectExecutable(page: Page, reset = false) {
 async function closeSettings(page: Page) {
   await page.locator('#codex-settings-close').click(); await page.locator('#settings-close').click();
 }
+
+test('필수 모듈 로드 실패를 런타임 준비 실패와 구분한다', async ({ page }) => {
+  await page.route('**/src/context-controls.ts', route => route.abort('failed'));
+  await expect(workspace(page)).rejects.toThrow(/Application bootstrap resource failed: .*context-controls\.ts: net::ERR_FAILED/);
+  expect(await calls(page, 'prepare_runtime')).toEqual([]);
+});
 
 test('공유서버 준비가 끝난 뒤에만 저장 세션을 복원하고 기본 void 응답을 허용한다', async ({ page }) => {
   await workspace(page, { hold: true });
