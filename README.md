@@ -109,6 +109,8 @@ Saved entries that are not running do not consume a concurrent-terminal slot.
 The existing resource limit of 32 terminals remains; automatic restoration leaves
 additional entries in the saved list when those terminal slots are full.
 
+Use **Restart session** (the circular arrow in the session header) to stop that session's owned process and reconnect the same conversation. The conversation ID, project and grid position are preserved. Running work is interrupted after confirmation. Finish or remove unsent drafts and attachments before restarting. The control stays unavailable until the conversation ID is known; failed cleanup never starts another process. A failed reconnect leaves the original conversation available for retry.
+
 ## Subagent management
 
 Use **Manage subagents** in a running session header to view its direct subagents.
@@ -155,7 +157,8 @@ Version numbers alone do not guarantee compatibility. The selected CLI and an al
 | --- | --- | --- | --- |
 | v0.6.0 release candidate, [deba0725](https://github.com/jaeseongs95/opendiy-desktop/commit/deba0725ea7420e84e95ab569c9a3534e67fa2c1) | Released R30, `1cacc86` | Released R30 artifact: `86cf681`; identity with the server in the limited test is unconfirmed | Four native steps checked only the unsupported-subagent-management boundary (run `b807b535`). This is not a complete integration pass for the combination. |
 | Same v0.6.0 release candidate | R31 development candidate, `e8a1d84` | Same R31 development candidate; final package identity pending | Protocol contracts were compared. Joint tests with the final executables remain pending. Requires shared-server/proxy support and the relevant feature declarations. |
-| Follow-up branch, [6929409](https://github.com/jaeseongs95/opendiy-desktop/commit/69294093d92ccdb859280009c5a2d340d54f0372) | Same R31 development candidate | Same R31 development candidate | Passed 70 affected browser tests and a separate code review. Joint tests with the actual CLI/server combination remain pending. Diagnostics do not initialize a connection, resume a session or change the server; unobserved support remains unknown. |
+| Follow-up branch, [6929409](https://github.com/jaeseongs95/opendiy-desktop/commit/69294093d92ccdb859280009c5a2d340d54f0372) | Same R31 development candidate | Same R31 development candidate | Passed 70 affected browser tests, 296 CI browser tests, 238 Rust tests, a native PTY test and a separate code review. Joint tests with the actual CLI/server combination remain pending. Diagnostics do not initialize a connection, resume a session or change the server; unobserved support remains unknown. |
+| Follow-up implementation `6929409` (later changes remain on the same branch) | R32 follow-up source, `b0d8fa11` | R32 source candidate; no final executable pairing | Candidate for combination review only. Joint tests with R32 executables have not run; this is not a verified combination. |
 
 See the [R30 release](https://github.com/jaeseongs95/opendiy-codex/releases/tag/v0.165.0-r30.20261101) and [OpenDIY Codex runtime documentation](https://github.com/jaeseongs95/opendiy-codex). R31 had not been handed off as a final package when this table was written; these development commits are not presented as verified stable distributions. Updating a server is separate from choosing an executable and may affect ongoing sessions.
 

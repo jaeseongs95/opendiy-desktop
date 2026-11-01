@@ -60,6 +60,9 @@ let runtimeCommandGeneration = 0;
 let executableMutation: Promise<unknown> | undefined;
 const restoringRequests = new Map<SavedSession, Promise<SessionInfo>>();
 const startOperations = new Set<Promise<SessionInfo>>();
+const restartingSessions = new Map<string, Promise<void>>();
+// Match the native metadata window; retired restart cards cannot consume output.
+const retiredRestartSessions = new Set<string>();
 // Failed shutdown events must not erase the restart intent saved before stopping.
 const exitResumeIntents = new Set<string>();
 const failedRestoreCards = new Set<string>();
@@ -467,7 +470,7 @@ function setActive(id: string, focus = true) {
 
 function canType(id: string) {
   const session = sessions.get(id);
-  return native && !!session?.active && isVisible(id) && !['restored', 'starting', 'stopping', 'stopped', 'exited'].includes(session.state);
+  return native && !restartingSessions.has(id) && !!session?.active && isVisible(id) && !['restored', 'starting', 'stopping', 'stopped', 'exited'].includes(session.state);
 }
 function refreshInputState(id: string) {
   const view = terminals.get(id); if (!view) return;
@@ -563,7 +566,7 @@ function mountConversation(session: Session) {
 
 function createTerminal(session: Session) {
   const card = document.createElement('article'); card.className = 'terminal-card'; card.dataset.id = session.id;
-  card.innerHTML = `<header class="terminal-header"><span class="drag-handle" draggable="true" title="드래그로 순서 변경" aria-hidden="true">⠿</span><span class="terminal-title"></span><span class="session-compaction" role="status" hidden></span><span class="session-state"></span><div class="card-actions"><button class="session-id-copy icon-button" type="button" disabled><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="8" y="8" width="12" height="13" rx="2"/><path d="M16 8V5a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h3"/></svg></button><span class="context-controls"></span><button class="subagents-open icon-button" type="button" aria-haspopup="dialog" aria-controls="subagents-dialog"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="5" r="3"/><circle cx="5" cy="19" r="3"/><circle cx="19" cy="19" r="3"/><path d="M12 8v4M5 16v-4h14v4"/></svg></button><button class="cron-open icon-button" type="button" aria-haspopup="dialog" aria-controls="cron-dialog"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 6v6l4 2"/></svg></button><button class="move-left icon-button" aria-label="앞으로 이동" title="앞으로 이동">‹</button><button class="move-right icon-button" aria-label="뒤로 이동" title="뒤로 이동">›</button><button class="conversation-toggle icon-button" type="button" aria-label="대화 보기" title="대화 / 터미널">☷</button><button class="maximize icon-button" aria-label="세션 최대화" title="세션 최대화">⛶</button><button class="stop icon-button" aria-label="이 세션 종료" title="이 세션 종료">×</button></div></header><div class="terminal-path"></div><div class="terminal-host"></div><div class="terminal-footer"><span class="terminal-identity"></span><span class="terminal-hint">직접 입력 · IME · 붙여넣기</span></div>`;
+  card.innerHTML = `<header class="terminal-header"><span class="drag-handle" draggable="true" title="드래그로 순서 변경" aria-hidden="true">⠿</span><span class="terminal-title"></span><span class="session-compaction" role="status" hidden></span><span class="session-state"></span><div class="card-actions"><button class="session-id-copy icon-button" type="button" disabled><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="8" y="8" width="12" height="13" rx="2"/><path d="M16 8V5a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h3"/></svg></button><span class="context-controls"></span><button class="subagents-open icon-button" type="button" aria-haspopup="dialog" aria-controls="subagents-dialog"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="5" r="3"/><circle cx="5" cy="19" r="3"/><circle cx="19" cy="19" r="3"/><path d="M12 8v4M5 16v-4h14v4"/></svg></button><button class="cron-open icon-button" type="button" aria-haspopup="dialog" aria-controls="cron-dialog"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 6v6l4 2"/></svg></button><button class="move-left icon-button" aria-label="앞으로 이동" title="앞으로 이동">‹</button><button class="move-right icon-button" aria-label="뒤로 이동" title="뒤로 이동">›</button><button class="conversation-toggle icon-button" type="button" aria-label="대화 보기" title="대화 / 터미널">☷</button><button class="maximize icon-button" aria-label="세션 최대화" title="세션 최대화">⛶</button><button class="session-restart icon-button" type="button"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 7v5h-5M20 12a8 8 0 1 0-2.3 5.7"/></svg></button><button class="stop icon-button" aria-label="이 세션 종료" title="이 세션 종료">×</button></div></header><div class="terminal-path"></div><div class="terminal-host"></div><div class="terminal-footer"><span class="terminal-identity"></span><span class="terminal-hint">직접 입력 · IME · 붙여넣기</span></div>`;
   localizeMarkup(card);
   const terminal = new Terminal({ fontFamily: '"Cascadia Code", "Cascadia Mono", Consolas, monospace', fontSize: 12, lineHeight: 1.45, cursorBlink: true, scrollback: 10000, disableStdin: !native, allowProposedApi: false, theme: { background: '#141820', foreground: '#ced5e3', cursor: '#a5b4fc', selectionBackground: '#3b4567', black: '#212735', red: '#f78b99', green: '#91d6ad', yellow: '#eac184', blue: '#8eaafb', magenta: '#c4a4f3', cyan: '#87cfd9', white: '#e3e8f0' } });
   const fit = new FitAddon(); const search = new SearchAddon(); terminal.loadAddon(fit); terminal.loadAddon(search);
@@ -601,6 +604,7 @@ function createTerminal(session: Session) {
   card.querySelector('.maximize')!.addEventListener('click', () => { maximized = maximized === session.id ? '' : session.id; renderGrid(); setActive(session.id); });
   card.querySelector('.stop')!.addEventListener('click', () => {
     const current = sessions.get(session.id)!;
+    if (restartingSessions.has(session.id) || exitInProgress) return;
     if (!current.active) { removeSession(session.id); return; }
     if (confirm(t(`“${current.title}” 세션을 종료할까요? 실행 중인 작업이 중단됩니다.`, `Stop session “${current.title}”? Running work will be interrupted.`))) {
       recordExplicitStop(current);
@@ -611,6 +615,9 @@ function createTerminal(session: Session) {
       }).catch(error => notifyError('종료 실패', 'Could not stop session', error));
     }
   });
+  const restartButton = card.querySelector<HTMLButtonElement>('.session-restart')!;
+  bindAttribute(restartButton, 'aria-label', '세션 재시작', 'Restart session'); bindAttribute(restartButton, 'title', '세션 재시작', 'Restart session');
+  restartButton.onclick = () => { void restartSession(session.id); };
   const copyIdButton = card.querySelector<HTMLButtonElement>('.session-id-copy')!;
   bindAttribute(copyIdButton, 'aria-label', '세션 ID 복사', 'Copy session ID'); bindAttribute(copyIdButton, 'title', '세션 ID 복사', 'Copy session ID');
   copyIdButton.onclick = async () => {
@@ -656,6 +663,7 @@ function removeSession(id: string, preserveRestore = false) {
   contextControls.get(id)?.dispose(); contextControls.delete(id); workspaceSlots = workspaceSlots.filter(slot => slot !== id); exitResumeIntents.delete(id); failedRestoreCards.delete(id); explicitlyStoppedSessions.delete(id); const view = terminals.get(id); const conversation = conversations.get(id); conversations.delete(id); conversationOwners.delete(id); if (conversation) void conversation.dispose({ sessionEnded: true }).catch(error => notify('대화 연결 정리를 확인하지 못했습니다. 세션 상태를 확인하세요.', true, 'Conversation cleanup could not be confirmed. Check the session status.')); clearTimeout(view?.resizeTimer); view?.input.dispose(); view?.resize.dispose(); view?.observer.disconnect(); view?.terminal.dispose(); view?.card.remove(); terminals.delete(id); sessions.delete(id); order = order.filter(item => item !== id); if (maximized === id) maximized = ''; if (active === id) active = visibleOrder()[0] ?? ''; renderAll(); scheduleSave(); }
 
 function receiveSession(info: SessionInfo, persist = true) {
+  if (retiredRestartSessions.has(info.id)) return;
   const previous = sessions.get(info.id); const session = updateSession(previous, info);
   if (session === previous) return;
   sessions.set(session.id, session);
@@ -693,6 +701,7 @@ async function resolveOrphan(id: string) {
   } finally { resolving.delete(id); }
 }
 function receiveOutput(output: Output) {
+  if (retiredRestartSessions.has(output.id)) { ack(output); return; }
   const session = sessions.get(output.id);
   if (!session) {
     const queue = pending.get(output.id) ?? [];
@@ -804,6 +813,8 @@ function renderAll() {
   for (const [id, session] of sessions) {
     const card = terminals.get(id)!.card;
     card.querySelector<HTMLButtonElement>('.session-id-copy')!.disabled = demo || !session.threadId;
+    card.querySelector<HTMLButtonElement>('.session-restart')!.disabled = !native || !workspaceReady || restoringWorkspace || exitInProgress || restartingSessions.has(id) || !session.threadId || ['starting', 'stopping'].includes(session.state);
+    card.querySelector<HTMLButtonElement>('.stop')!.disabled = restartingSessions.has(id) || exitInProgress;
     card.querySelector<HTMLButtonElement>('.cron-open')!.disabled = !session.active || exitInProgress;
     card.querySelector<HTMLButtonElement>('.subagents-open')!.disabled = !native || !session.active || !session.threadId || exitInProgress;
     card.querySelector('.terminal-title')!.textContent = session.title;
@@ -894,7 +905,63 @@ $('#settings-open').onclick = () => $<HTMLDialogElement>('#settings-dialog').sho
 for (const button of document.querySelectorAll<HTMLElement>('[data-close]')) button.onclick = () => button.closest('dialog')?.close();
 $('#column-options').onclick = event => { const button = (event.target as HTMLElement).closest<HTMLElement>('[data-columns]'); if (button) { columns = Number(button.dataset.columns); maximized = ''; renderGrid(); scheduleSave(); } };
 
-async function start(request: SavedSession, focus = true) {
+async function restartSession(id: string): Promise<void> {
+  if (restartingSessions.has(id)) return restartingSessions.get(id);
+  const current = sessions.get(id); const view = terminals.get(id);
+  if (!native || !current?.threadId || !view || !workspaceReady || restoringWorkspace || exitInProgress || ['starting', 'stopping'].includes(current.state)) return;
+  const conversation = conversations.get(id);
+  if (conversation?.hasDraft() || (conversation && !conversation.canRestart()) || view.card.querySelector<HTMLButtonElement>('.conversation-toggle')!.disabled) {
+    notify('작성 중인 내용이나 처리 중인 요청이 있습니다. 초안과 첨부를 정리하고 요청이 끝난 뒤 재시작하세요.', true, 'There is a draft or pending request. Finish your draft and attachments and wait for pending requests before restarting.'); return;
+  }
+  if (!confirm(t(`“${current.title}” 세션을 재시작할까요? 실행 중인 작업이 중단되며 같은 대화를 다시 연결합니다.`, `Restart session “${current.title}”? Running work will be interrupted and the same conversation will reconnect.`))) return;
+  const replacement: SessionReplacement = { id, generation: current.generation, threadId: current.threadId, projectId: current.projectId, projectAssigned: current.projectAssigned, projectRevision: current.projectRevision };
+  const selectionVersion = projectSelectionVersion;
+  const before = new Set(sessions.keys());
+  // Preserve the restart intent if exit begins while the old process is stopping.
+  explicitlyStoppedSessions.delete(id); exitResumeIntents.add(id);
+  view.card.inert = true; view.input.cancelPending(); view.resize.cancelPending(); clearTimeout(view.resizeTimer); refreshInputState(id);
+  const operation = Promise.resolve().then(async () => {
+    try {
+      // Inactive metadata can still carry an unconfirmed native cleanup receipt.
+      await call('session_stop', { id, generation: replacement.generation });
+      const latest = await call<SessionInfo[]>('list_sessions');
+      for (const info of latest) if (sessions.has(info.id)) receiveSession(info);
+      const stopped = latest.find(info => info.id === id && info.generation === replacement.generation);
+      if (!stopped || stopped.active || !replacementCurrent(replacement)) throw new UiError('이전 세션의 종료 또는 상태를 확인하지 못했습니다. 현재 세션을 확인한 뒤 다시 시도하세요.', 'Could not confirm that the previous session stopped or remained unchanged. Check its state and retry.');
+      if (exitInProgress) return;
+      const request = savedSessionMetadata({ ...stopped, resumeOnStartup: true });
+      const next = await start(request, false, replacement);
+      if (!next.active || next.threadId !== replacement.threadId || ['error', 'stopping'].includes(next.state)) throw new UiError('세션을 다시 연결하지 못했습니다. 같은 대화에서 재시작을 다시 시도하세요.', 'Could not reconnect the session. Retry restarting the same conversation.');
+      workspaceSlots = workspaceSlots.map(slot => slot === id ? next.id : slot);
+      workspaceSlots = workspaceSlots.filter((slot, index, slots) => typeof slot !== 'string' || slots.indexOf(slot) === index);
+      order = order.filter(item => item !== next.id).map(item => item === id ? next.id : item);
+      if (maximized === id) maximized = next.id;
+      if (active === id) active = next.id;
+      retiredRestartSessions.add(id);
+      if (retiredRestartSessions.size > MAX_SAVED_WORKSPACE_SESSIONS) retiredRestartSessions.delete(retiredRestartSessions.values().next().value!);
+      removeSession(id, true);
+      renderAll();
+      if (selectionVersion === projectSelectionVersion && isVisible(next.id) && active === next.id) setActive(next.id);
+      notify('같은 대화로 세션을 재시작했습니다.', false, 'The session restarted with the same conversation.');
+    } catch {
+      // Keep live/unknown ownership; remove only reaped cards created by this attempt.
+      for (const info of [...sessions.values()]) if (!before.has(info.id) && info.threadId === replacement.threadId && !info.active) removeSession(info.id, true);
+      notify('세션을 재시작하지 못했습니다. 기존 대화는 유지됩니다. 세션 상태를 확인하고 다시 시도하세요.', true, 'Could not restart the session. The existing conversation is preserved. Check its state and retry.');
+    } finally {
+      restartingSessions.delete(id); view.card.inert = false; refreshInputState(id); renderAll(); scheduleSave();
+    }
+  });
+  restartingSessions.set(id, operation); renderAll();
+  return operation;
+}
+
+interface SessionReplacement { id: string; generation: number; threadId: string; projectId?: string | null; projectAssigned?: boolean; projectRevision?: number }
+function replacementCurrent(replacement: SessionReplacement) {
+  const current = sessions.get(replacement.id);
+  return !!current && !current.active && current.generation === replacement.generation && current.threadId === replacement.threadId && current.projectId === replacement.projectId && current.projectAssigned === replacement.projectAssigned && current.projectRevision === replacement.projectRevision;
+}
+
+async function start(request: SavedSession, focus = true, replacement?: SessionReplacement) {
   if (exitInProgress) throw new UiError('앱 종료 중에는 세션을 시작할 수 없습니다.', 'Cannot start a session while the app is exiting.');
   if (!workspaceReady) throw new UiError('저장된 작업 공간을 확인하고 있습니다. 잠시 후 다시 시도하세요.', 'The saved workspace is still loading. Try again shortly.');
   for (const info of sessions.values()) if (info.threadId === request.threadId) exitResumeIntents.delete(info.id);
@@ -912,6 +979,7 @@ async function start(request: SavedSession, focus = true) {
     try {
       await prepareRuntime();
       if (exitInProgress) throw new UiError('앱 종료 중에는 세션을 시작할 수 없습니다.', 'Cannot start a session while the app is exiting.');
+      if (replacement && !replacementCurrent(replacement)) throw new UiError('재시작 대상 상태가 바뀌었습니다. 현재 세션을 확인하고 다시 시도하세요.', 'The restart target changed. Check the current session and retry.');
       const existing = request.threadId && [...sessions.values()].find(item => item.threadId === request.threadId && item.active);
       if (existing) {
         let latest: SessionInfo[];
@@ -924,14 +992,17 @@ async function start(request: SavedSession, focus = true) {
           if (sessions.get(owned.id)?.active) { if (focus && selectionVersion === projectSelectionVersion) focusSession(owned.id); return owned; }
         }
       }
+      if (replacement && !replacementCurrent(replacement)) throw new UiError('재시작 대상 상태가 바뀌었습니다. 현재 세션을 확인하고 다시 시도하세요.', 'The restart target changed. Check the current session and retry.');
+      const replaced = Number(!!replacement);
       // Reserve capacity only for a new native process, after reconciling any existing card.
-      if (sessions.size + pendingStarts >= MAX_WORKSPACE_SESSIONS) throw new UiError(`작업 공간에는 시작 중인 세션을 포함해 최대 ${MAX_WORKSPACE_SESSIONS}개를 표시할 수 있습니다. 완료된 세션을 닫은 뒤 다시 시작하세요.`, `A workspace can display at most ${MAX_WORKSPACE_SESSIONS} sessions, including sessions that are starting. Close a finished session and try again.`);
-      if (sessions.size + saved.length - pendingRestoreOwnerIds().size + pendingStarts - Number(saved.includes(request)) >= MAX_SAVED_WORKSPACE_SESSIONS) throw new UiError('저장 메타데이터는 최대 512개입니다. 저장 목록에서 불필요한 항목을 제거한 뒤 다시 시도하세요.', 'Workspace metadata is limited to 512 entries. Remove unused saved entries and retry.');
+      if (sessions.size - replaced + pendingStarts >= MAX_WORKSPACE_SESSIONS) throw new UiError(`작업 공간에는 시작 중인 세션을 포함해 최대 ${MAX_WORKSPACE_SESSIONS}개를 표시할 수 있습니다. 완료된 세션을 닫은 뒤 다시 시작하세요.`, `A workspace can display at most ${MAX_WORKSPACE_SESSIONS} sessions, including sessions that are starting. Close a finished session and try again.`);
+      if (sessions.size - replaced + saved.length - pendingRestoreOwnerIds().size + pendingStarts - Number(saved.includes(request)) >= MAX_SAVED_WORKSPACE_SESSIONS) throw new UiError('저장 메타데이터는 최대 512개입니다. 저장 목록에서 불필요한 항목을 제거한 뒤 다시 시도하세요.', 'Workspace metadata is limited to 512 entries. Remove unused saved entries and retry.');
       pendingStarts++; reserved = true;
       try {
         // Ownership refreshes above may have yielded while the executable changed.
         await prepareRuntime();
         if (exitInProgress) throw new UiError('앱 종료 중에는 세션을 시작할 수 없습니다.', 'Cannot start a session while the app is exiting.');
+        if (replacement && !replacementCurrent(replacement)) throw new UiError('재시작 대상 상태가 바뀌었습니다. 현재 세션을 확인하고 다시 시도하세요.', 'The restart target changed. Check the current session and retry.');
         const info = await call<SessionInfo>('start_session', { request: { title: request.title, cwd: request.cwd, ...(request.threadId ? { threadId: request.threadId } : {}), ...(request.projectAssigned || request.projectId !== undefined ? { projectId: request.projectId ?? null, projectAssigned: true } : {}), cols: 100, rows: 30 } });
         if (!info.active || (sessions.get(info.id)?.generation ?? -1) < info.generation) receiveSession(info);
         if (focus && selectionVersion === projectSelectionVersion) focusSession(info.id);
@@ -1008,7 +1079,7 @@ async function requestExit(allowUnconfirmedRemote = false) {
     // A rejection settles ownership; prepareRuntime retains its distinct failure state.
     const preparing = runtimeCommand && runtimeCommandGeneration === runtimeGeneration ? runtimePreparation : undefined;
     await Promise.all([extensionsManager.beginExit(), mobileControl.beginExit(), weeklyUsage.beginExit(), questionCenter.beginExit(), cronManager.beginExit(), subagentManager.beginExit(), initialization, runtimeRestoration?.catch(() => {}), Promise.allSettled([runtimeCommand, preparing])]);
-    await Promise.allSettled([...startOperations, ...restoringRequests.values()]);
+    await Promise.allSettled([...startOperations, ...restoringRequests.values(), ...restartingSessions.values()]);
     if (native && !workspaceReady) throw new UiError('저장된 작업 공간을 확인하지 못해 종료 정보를 덮어쓰지 않았습니다.', 'Could not load the saved workspace; exit metadata was not overwritten.');
     bindText(button, '종료 중…', 'Exiting…');
     for (const session of sessions.values()) if (session.active && session.state !== 'stopping' && !explicitlyStoppedSessions.has(session.id)) exitResumeIntents.add(session.id);

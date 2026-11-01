@@ -15,6 +15,7 @@ test.beforeEach(async ({ page }) => {
         if (command === 'get_ui_language') return 'ko';
         if (command === 'load_layout') return { version: 1, columns: 1, sessions: [] };
         if (command === 'list_projects') return [];
+        if (command === 'choose_conversation_attachments') return state.fixtureAttachments ?? [];
         if (command === 'list_sessions') return [{ id: 'chat-session', generation: 1, title: '기존 세션', cwd: 'D:\\Work', threadId: 'original-thread', state: 'idle', active: true }];
         if (command === 'cron_request') return state.cronSnapshot ?? { supported: false, connected: false, scope: 'cliLifetime', jobs: [], hasMore: false, reason: 'unsupported' };
         if (command === 'conversation_request') {
@@ -41,6 +42,23 @@ test.beforeEach(async ({ page }) => {
       },
     };
   });
+});
+
+test('세션 재시작은 미전송 초안과 첨부를 보존하며 종료 명령을 보내지 않는다', async ({ page }) => {
+  await page.goto('/');
+  const card = page.locator('.terminal-card[data-id="chat-session"]');
+  await card.locator('.conversation-toggle').click();
+  const input = card.locator('.conversation-input');
+  await input.fill('아직 보내지 않은 초안');
+  await card.getByRole('button', { name: '세션 재시작', exact: true }).click();
+  await expect(input).toHaveValue('아직 보내지 않은 초안');
+  await input.fill('');
+  await page.evaluate(() => { (window as any).fixtureAttachments = [{ type: 'file', path: 'D:\\Work\\draft.txt', name: 'draft.txt' }]; });
+  await card.locator('.conversation-attach').click();
+  await expect(card.locator('.conversation-attachment')).toContainText('draft.txt');
+  await card.getByRole('button', { name: '세션 재시작', exact: true }).click();
+  await expect(card.locator('.conversation-attachment')).toContainText('draft.txt');
+  expect(await page.evaluate(() => (window as any).chatCalls.filter((entry: any) => ['session_stop', 'start_session', 'cleanup_conversation_attachment'].includes(entry.command)))).toEqual([]);
 });
 
 for (const startingView of ['terminal', 'conversation'] as const) {

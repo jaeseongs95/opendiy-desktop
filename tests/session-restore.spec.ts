@@ -3,16 +3,17 @@ import { test, expect, type Page } from '@playwright/test';
 const a = { title: '복원 첫째', cwd: 'D:\\work', threadId: 'thread-a', sessionId: 'old-a', resumeOnStartup: true };
 const b = { title: '복원 둘째', cwd: 'D:\\work', threadId: 'thread-b', sessionId: 'old-b', resumeOnStartup: true };
 
-async function workspace(page: Page, options: { sessions?: any[]; holdFirst?: boolean; holdSecond?: boolean; holdLayout?: boolean; holdStop?: boolean; holdError?: boolean; holdReconcile?: boolean; cancelStartOnStop?: boolean; lateSuccess?: boolean; project?: boolean; failFirst?: boolean; failActive?: boolean; live?: boolean; failSave?: boolean; failExit?: boolean } = {}) {
+async function workspace(page: Page, options: { sessions?: any[]; holdFirst?: boolean; holdSecond?: boolean; holdLayout?: boolean; holdStop?: boolean; holdError?: boolean; holdReconcile?: boolean; cancelStartOnStop?: boolean; lateSuccess?: boolean; project?: boolean; failFirst?: boolean; failActive?: boolean; live?: boolean; liveCount?: number; failSave?: boolean; failExit?: boolean } = {}) {
   await page.addInitScript(({ options, a, b }) => {
     const state = window as any; state.isTauri = true;
     let callback = 0;
     const callbacks = new Map<number, (value: any) => void>();
     const listeners = new Map<string, (value: any) => void>();
-    const live = options.live ? [{ ...a, id: a.sessionId, generation: 1, state: 'idle', active: true }] : [];
+    const live = options.live ? Array.from({ length: options.liveCount ?? 1 }, (_, index) => ({ ...a, ...(index ? { title: `추가 ${index}`, threadId: `other-${index}`, sessionId: `other-${index}` } : {}), id: index ? `other-${index}` : a.sessionId, generation: 1, state: 'idle', active: true })) : [];
     const projects = JSON.parse(localStorage.getItem('restore-test-projects') || 'null') || (options.project ? [{ id: 'p', name: '복원 프로젝트', cwd: a.cwd, createdAt: 1, favorite: false }, { id: 'q', name: '다른 프로젝트', cwd: null, createdAt: 2, favorite: false }] : []);
-    const fixture = state.restoreFixture = { calls: [] as any[], live, starts: 0, current: 0, maxCurrent: 0, stoppedIds: [] as string[], release: () => {}, releaseSecond: () => {}, releaseStop: () => {}, releaseError: () => {}, releaseReconcile: () => {}, releaseLayout: () => {}, failSave: !!options.failSave, failExit: !!options.failExit,
+    const fixture = state.restoreFixture = { calls: [] as any[], live, starts: 0, current: 0, maxCurrent: 0, stoppedIds: [] as string[], release: () => {}, releaseSecond: () => {}, releaseStop: () => {}, releaseError: () => {}, releaseReconcile: () => {}, releaseLayout: () => {}, failSave: !!options.failSave, failExit: !!options.failExit, failStop: false, keepActiveAfterStop: false, stopFailureInactive: false,
       emit(info: any) { listeners.get('session-changed')?.({ event: 'session-changed', id: 1, payload: info }); },
+      emitOutput(output: any) { listeners.get('terminal-output')?.({ event: 'terminal-output', id: 1, payload: output }); },
     };
     state.__TAURI_EVENT_PLUGIN_INTERNALS__ = { unregisterListener() {} };
     state.__TAURI_INTERNALS__ = {
@@ -52,7 +53,12 @@ async function workspace(page: Page, options: { sessions?: any[]; holdFirst?: bo
         }
         if (command === 'session_stop') {
           fixture.stoppedIds.push(args.id);
+          if (fixture.failStop) {
+            if (fixture.stopFailureInactive) { const info = fixture.live.find((item: any) => item.id === args.id)!; Object.assign(info, { state: 'error', active: false }); fixture.emit({ ...info }); }
+            throw new Error('STOP_FAILED');
+          }
           if (options.holdStop) await new Promise<void>(resolve => { fixture.releaseStop = resolve; });
+          if (fixture.keepActiveAfterStop) return null;
           const info = fixture.live.find((item: any) => item.id === args.id); Object.assign(info, { state: 'stopped', active: false }); fixture.emit(info);
         }
         if (command === 'delete_project') {
@@ -296,4 +302,86 @@ for (const reconcile of [false, true]) test(`비활성 오류 카드의 명시 �
   await expect(page.locator('#restore-banner')).toBeHidden();
   await page.reload(); await expect(page.locator('#app')).toHaveAttribute('aria-busy', 'false');
   expect(await calls(page, 'start_session')).toEqual([]);
+});
+
+
+test('재시작은 이전 프로세스 종료를 기다리고 같은 대화를 원래 자리에 한 번만 연결한다', async ({ page }) => {
+  await workspace(page, { live: true, liveCount: 2, sessions: [], holdStop: true });
+  const card = page.locator('.terminal-card[data-id="old-a"]');
+  await expect(card.getByRole('button', { name: '세션 재시작', exact: true })).toBeEnabled();
+  page.on('dialog', dialog => dialog.accept());
+  await card.getByRole('button', { name: '세션 재시작', exact: true }).click();
+  await page.evaluate(() => document.querySelector<HTMLButtonElement>('[data-id="old-a"] .session-restart')!.click());
+  expect((await calls(page, 'session_stop')).map(item => item.args)).toEqual([{ id: 'old-a', generation: 1 }]);
+  expect(await calls(page, 'start_session')).toEqual([]);
+  await page.evaluate(() => (window as any).restoreFixture.releaseStop());
+  await expect(page.locator('.terminal-card')).toHaveCount(2);
+  await expect(page.locator('.terminal-title')).toHaveText([a.title, '추가 1']);
+  await expect(page.locator('.terminal-card').first()).toHaveAttribute('data-id', 'new-1');
+  await page.evaluate(() => { const f = (window as any).restoreFixture; f.emit({ ...f.live[0], state: 'idle', active: true }); f.emitOutput({ id: 'old-a', generation: 1, seq: 999, data: 'late output' }); });
+  await expect(page.locator('.terminal-card')).toHaveCount(2);
+  await expect.poll(async () => (await calls(page, 'session_output_ack')).some(item => item.args.id === 'old-a' && item.args.seq === 999)).toBe(true);
+  expect((await calls(page, 'start_session')).map(item => item.args.request)).toEqual([{ title: a.title, cwd: a.cwd, threadId: a.threadId, cols: 100, rows: 30 }]);
+  await expect.poll(async () => (await saved(page))?.sessions[0]?.threadId).toBe(a.threadId);
+});
+
+test('재시작 종료 실패와 종료 미확인에는 새 프로세스를 만들지 않는다', async ({ page }) => {
+  await workspace(page, { live: true, sessions: [] }); page.on('dialog', dialog => dialog.accept());
+  const restart = page.getByRole('button', { name: '세션 재시작', exact: true });
+  await page.evaluate(() => { (window as any).restoreFixture.failStop = true; }); await restart.click();
+  await expect(restart).toBeEnabled(); expect(await calls(page, 'start_session')).toEqual([]);
+  await page.evaluate(() => { Object.assign((window as any).restoreFixture, { failStop: false, keepActiveAfterStop: true }); }); await restart.click();
+  await expect(restart).toBeEnabled(); expect(await calls(page, 'start_session')).toEqual([]);
+  await expect(page.locator('.terminal-card')).toHaveAttribute('data-id', 'old-a');
+});
+
+test('재시작 연결 실패는 원래 대화를 보존하며 같은 아이콘으로 다시 시도한다', async ({ page }) => {
+  await workspace(page, { live: true, sessions: [], failFirst: true }); page.on('dialog', dialog => dialog.accept());
+  await page.getByRole('button', { name: '세션 재시작', exact: true }).click();
+  await expect(page.locator('.terminal-card')).toHaveCount(1);
+  await expect(page.locator('.terminal-card')).toHaveAttribute('data-id', 'old-a');
+  await expect(page.getByRole('button', { name: '세션 재시작', exact: true })).toBeEnabled();
+  await page.getByRole('button', { name: '세션 재시작', exact: true }).click();
+  await expect(page.locator('.terminal-card')).toHaveAttribute('data-id', 'new-2');
+  expect((await calls(page, 'start_session')).map(item => item.args.request.threadId)).toEqual([a.threadId, a.threadId]);
+});
+
+test('비활성 오류여도 종료 결과 미확인은 재시작 재시도에서 우회하지 않는다', async ({ page }) => {
+  await workspace(page, { live: true, sessions: [] }); page.on('dialog', dialog => dialog.accept());
+  await page.evaluate(() => { Object.assign((window as any).restoreFixture, { failStop: true, stopFailureInactive: true }); });
+  const restart = page.getByRole('button', { name: '세션 재시작', exact: true });
+  await restart.click(); await expect(restart).toBeEnabled();
+  await restart.click(); await expect(restart).toBeEnabled();
+  expect((await calls(page, 'session_stop')).length).toBe(2);
+  expect(await calls(page, 'start_session')).toEqual([]);
+  await expect(page.locator('.terminal-card')).toHaveAttribute('data-id', 'old-a');
+});
+
+test('재시작 대기 중 프로젝트 변경은 늦은 재개를 막고 식별자 미확인 세션은 비활성화한다', async ({ page }) => {
+  await workspace(page, { live: true, sessions: [], holdStop: true }); page.on('dialog', dialog => dialog.accept());
+  await page.getByRole('button', { name: '세션 재시작', exact: true }).click();
+  await page.evaluate(() => { const f = (window as any).restoreFixture; Object.assign(f.live[0], { projectAssigned: true, projectId: null, projectRevision: 1 }); f.emit({ ...f.live[0] }); f.releaseStop(); });
+  await expect(page.getByRole('button', { name: '세션 재시작', exact: true })).toBeEnabled();
+  expect(await calls(page, 'start_session')).toEqual([]);
+  await page.evaluate(() => { const f = (window as any).restoreFixture; delete f.live[0].threadId; f.emit({ ...f.live[0] }); });
+  await expect(page.getByRole('button', { name: '세션 재시작', exact: true })).toBeDisabled();
+});
+
+test('32개 열린 카드에서도 재시작 대상 한 자리만 교체한다', async ({ page }) => {
+  await workspace(page, { live: true, liveCount: 32, sessions: [] }); page.on('dialog', dialog => dialog.accept());
+  await page.locator('[data-id="old-a"] .session-restart').click();
+  await expect(page.locator('.terminal-card')).toHaveCount(32);
+  await expect(page.locator('.terminal-card').first()).toHaveAttribute('data-id', 'new-1');
+  expect((await calls(page, 'start_session')).length).toBe(1);
+});
+
+test('재시작 종료 대기 중 앱 종료는 재개를 취소하고 다음 실행 의도를 저장한다', async ({ page }) => {
+  await workspace(page, { live: true, sessions: [], holdStop: true }); page.on('dialog', dialog => dialog.accept());
+  await page.getByRole('button', { name: '세션 재시작', exact: true }).click();
+  await page.locator('#exit').click(); await page.locator('#confirm-exit').click();
+  expect(await calls(page, 'complete_exit')).toEqual([]);
+  await page.evaluate(() => (window as any).restoreFixture.releaseStop());
+  await expect.poll(async () => (await calls(page, 'complete_exit')).length).toBe(1);
+  expect(await calls(page, 'start_session')).toEqual([]);
+  expect((await saved(page)).sessions[0]).toMatchObject({ threadId: a.threadId, resumeOnStartup: true });
 });

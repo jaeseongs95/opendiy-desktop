@@ -618,6 +618,7 @@ export function createConversation(options: ConversationOptions) {
     setForeground,
     refresh: () => visible && foreground && !loading ? loadPage() : Promise.resolve(),
     hasDraft: () => !!input.value || !!attachments.length,
+    canRestart: () => !sending && !staging && !uncertain && !composing && !interrupting && !responding.size && !questionDrafts.size,
     async dispose({ sessionEnded = false }: { sessionEnded?: boolean } = {}) {
       if (disposed) return;
       // The host may abandon a confirmed ended generation; an active lease always needs detach.

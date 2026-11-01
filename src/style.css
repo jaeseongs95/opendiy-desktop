@@ -36,4 +36,4 @@
 @media(max-width:900px){.top-actions{gap:6px}.topbar{padding-left:12px;padding-right:12px}}
 @media(max-height:620px){.sidebar>.brand{height:58px}.sidebar-lists{margin-top:8px;gap:4px}.sidebar #weekly-usage{padding:8px;font-size:10px}}
 
-.session-id-copy svg{width:17px;height:17px;fill:none;stroke:currentColor;stroke-width:1.6}
+.session-id-copy svg,.session-restart svg{width:17px;height:17px;fill:none;stroke:currentColor;stroke-width:1.6}
