@@ -576,6 +576,31 @@ mod tests {
     }
 
     #[test]
+    fn storage_snapshot_accepts_exact_entry_limit_and_rejects_overflow_without_deleting() {
+        assert_eq!(MAX_STORAGE_ENTRIES, 16384);
+        let root = std::env::temp_dir().join(format!("opendiy-storage-entry-limit-test-{}", uuid::Uuid::new_v4()));
+        let directory = root.join("previous-process");
+        fs::create_dir_all(&directory).unwrap();
+        // The root directory entry and persistent lock count toward the same bound.
+        for index in 0..MAX_STORAGE_ENTRIES - 2 {
+            fs::write(directory.join(format!("{index}.png")), b"").unwrap();
+        }
+        let manager = ConversationAttachments::test_store(root.clone());
+        let exact = manager.storage_usage().unwrap();
+        assert_eq!(exact.total_files, MAX_STORAGE_ENTRIES - 2);
+        assert_eq!(exact.other_files, MAX_STORAGE_ENTRIES - 2);
+        let overflow = directory.join("overflow.png");
+        fs::write(&overflow, [1, 2, 3]).unwrap();
+        assert!(manager.storage_usage().unwrap_err().contains("항목 수 상한"));
+        assert_eq!(fs::read(&overflow).unwrap(), [1, 2, 3]);
+        assert_eq!(fs::read_dir(&directory).unwrap().count(), MAX_STORAGE_ENTRIES - 1);
+        fs::remove_file(&overflow).unwrap();
+        assert_eq!(manager.storage_usage().unwrap().total_files, exact.total_files);
+        drop(manager);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn strict_base64_rejects_malformed_and_oversized_input() {
         assert_eq!(decode_base64("YWJj").unwrap(), b"abc");
         assert_eq!(decode_base64("YQ==").unwrap(), b"a");
