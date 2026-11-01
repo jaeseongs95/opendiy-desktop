@@ -11,6 +11,8 @@ pub struct RuntimeCompatibility {
     pub cli_error: Option<String>,
     pub server_state: &'static str,
     pub server_version: Option<String>,
+    pub selected_server_executable: Option<String>,
+    pub selected_server_version: Option<String>,
     pub server_error: Option<String>,
     pub subagents: Option<bool>,
     pub compact_if_idle: Option<bool>,
@@ -31,6 +33,30 @@ fn discover(mut query: impl FnMut(&[&str]) -> Result<Vec<u8>, String>) -> Result
     shared::lifecycle_socket(&value)?;
     version_text(value["appServerVersion"].as_str().ok_or("공유 서버 버전이 없습니다.")?.as_bytes())?;
     Ok(Some(value))
+}
+
+// 이 선택값은 다음 시작 대상이며 현재 실행 중인 서버의 신원이 아니다.
+fn selected_server(value: &Value) -> Result<(Option<String>, Option<String>), String> {
+    let path = match value.get("managedCodexPath") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(path)) if !path.is_empty() && path.chars().count() <= 1024
+            && !path.chars().any(char::is_control) && std::path::Path::new(path).is_absolute() => Some(path.clone()),
+        _ => return Err("다음 시작에 선택된 서버 실행 파일 경로가 올바르지 않습니다.".into()),
+    };
+    let version = match value.get("managedCodexVersion") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(version)) => Some(version_text(version.as_bytes())?),
+        _ => return Err("다음 시작에 선택된 서버 버전이 올바르지 않습니다.".into()),
+    };
+    Ok((path, version))
+}
+
+fn record_server_versions(report: &mut RuntimeCompatibility, value: &Value) -> Result<(), String> {
+    report.server_version = Some(version_text(value["appServerVersion"].as_str().ok_or("공유 서버 버전이 없습니다.")?.as_bytes())?);
+    report.server_state = "running";
+    let (path, version) = selected_server(value)?;
+    report.selected_server_executable = path; report.selected_server_version = version;
+    Ok(())
 }
 
 fn capability(value: &Value, field: &str) -> Result<Option<bool>, String> {
@@ -61,7 +87,7 @@ pub fn inspect(exe: &OsString, cancelled: &Arc<AtomicBool>, observed: &[shared::
     let cli = query(&["--version"]).and_then(|bytes| version_text(&bytes));
     let mut report = RuntimeCompatibility {
         executable: exe.to_string_lossy().into_owned(), cli_version: cli.as_ref().ok().cloned(), cli_error: cli.err(),
-        server_state: "unavailable", server_version: None, server_error: None,
+        server_state: "unavailable", server_version: None, selected_server_executable: None, selected_server_version: None, server_error: None,
         subagents: None, compact_if_idle: None, expected_turn_interrupt: None,
     };
     let server = (|| {
@@ -77,9 +103,7 @@ pub fn inspect(exe: &OsString, cancelled: &Arc<AtomicBool>, observed: &[shared::
             }
         }
         if let Some(value) = snapshot { report.subagents = value.subagents; report.expected_turn_interrupt = value.expected_turn_interrupt; }
-        report.server_version = Some(value["appServerVersion"].as_str().ok_or("공유 서버 버전이 없습니다.")?.to_owned());
-        report.server_state = "running";
-        Ok(())
+        record_server_versions(&mut report, &value)
     })();
     if let Err(error) = server {
         report.server_error = Some(error); report.subagents = None; report.compact_if_idle = None; report.expected_turn_interrupt = None;
@@ -91,7 +115,7 @@ pub fn inspect(exe: &OsString, cancelled: &Arc<AtomicBool>, observed: &[shared::
 #[cfg(test)]
 mod tests {
     use super::*;
-    fn report() -> RuntimeCompatibility { RuntimeCompatibility { executable: "fixture.exe".into(), cli_version: None, cli_error: None, server_state: "unavailable", server_version: None, server_error: None, subagents: None, compact_if_idle: None, expected_turn_interrupt: None } }
+    fn report() -> RuntimeCompatibility { RuntimeCompatibility { executable: "fixture.exe".into(), cli_version: None, cli_error: None, server_state: "unavailable", server_version: None, selected_server_executable: None, selected_server_version: None, server_error: None, subagents: None, compact_if_idle: None, expected_turn_interrupt: None } }
     #[test]
     fn discovery_only_reads_help_and_version_and_never_starts_a_missing_server() {
         let socket = env::current_dir().unwrap().join("diagnostic.sock");
@@ -104,6 +128,34 @@ mod tests {
         assert!(discover(|args| { calls.push(args.join(" ")); if args.last() == Some(&"--help") { Ok(help.to_vec()) } else { Err("서버 없음".into()) } }).is_err());
         assert_eq!(calls, ["app-server --help", "app-server daemon version"]);
         assert!(version_text(b"wrong\nmultiple").is_err());
+    }
+    #[test]
+    fn selected_server_metadata_never_substitutes_for_the_running_version() {
+        let path = env::current_dir().unwrap().join("selected-server.exe");
+        let value = json!({"managedCodexPath":path,"managedCodexVersion":"selected-v2","appServerVersion":"running-v1"});
+        let mut actual = report();
+        actual.cli_version = Some("cli-v3".into());
+        record_server_versions(&mut actual, &value).unwrap();
+        assert_eq!(actual.selected_server_executable, Some(path.to_string_lossy().into_owned()));
+        assert_eq!(actual.selected_server_version.as_deref(), Some("selected-v2"));
+        assert_eq!(actual.server_version.as_deref(), Some("running-v1"));
+        assert_eq!(actual.cli_version.as_deref(), Some("cli-v3"));
+        assert_eq!(actual.server_state, "running");
+        let mut partial = report();
+        assert!(record_server_versions(&mut partial, &json!({"appServerVersion":"running-v1","managedCodexPath":42})).is_err());
+        assert_eq!(partial.server_version.as_deref(), Some("running-v1"));
+        assert_eq!(partial.server_state, "running");
+        assert!(partial.selected_server_executable.is_none());
+        for old in [json!({}), json!({"managedCodexPath":null,"managedCodexVersion":null})] {
+            assert_eq!(selected_server(&old).unwrap(), (None, None));
+        }
+        for invalid in [json!({"managedCodexPath":42}), json!({"managedCodexPath":"relative.exe"}),
+            json!({"managedCodexPath":""}), json!({"managedCodexPath":format!("{}\n", path.display())}),
+            json!({"managedCodexPath":format!("{}{}", path.display(), "x".repeat(1025))}),
+            json!({"managedCodexVersion":false}), json!({"managedCodexVersion":""}),
+            json!({"managedCodexVersion":"one\ntwo"}), json!({"managedCodexVersion":"v".repeat(257)})] {
+            assert!(selected_server(&invalid).is_err(), "{invalid}");
+        }
     }
     #[test]
     fn support_is_not_inferred_from_version_or_malformed_flags() {
