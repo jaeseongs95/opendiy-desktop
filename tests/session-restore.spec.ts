@@ -11,7 +11,7 @@ async function workspace(page: Page, options: { sessions?: any[]; holdFirst?: bo
     const listeners = new Map<string, (value: any) => void>();
     const live = options.live ? Array.from({ length: options.liveCount ?? 1 }, (_, index) => ({ ...a, ...(index ? { title: `추가 ${index}`, threadId: `other-${index}`, sessionId: `other-${index}` } : {}), id: index ? `other-${index}` : a.sessionId, generation: 1, state: 'idle', active: true })) : [];
     const projects = JSON.parse(localStorage.getItem('restore-test-projects') || 'null') || (options.project ? [{ id: 'p', name: '복원 프로젝트', cwd: a.cwd, createdAt: 1, favorite: false }, { id: 'q', name: '다른 프로젝트', cwd: null, createdAt: 2, favorite: false }] : []);
-    const fixture = state.restoreFixture = { calls: [] as any[], live, starts: 0, current: 0, maxCurrent: 0, stoppedIds: [] as string[], release: () => {}, releaseSecond: () => {}, releaseStop: () => {}, releaseError: () => {}, releaseReconcile: () => {}, releaseLayout: () => {}, failSave: !!options.failSave, failExit: !!options.failExit, failStop: false, keepActiveAfterStop: false, stopFailureInactive: false,
+    const fixture = state.restoreFixture = { calls: [] as any[], live, starts: 0, current: 0, maxCurrent: 0, stoppedIds: [] as string[], release: () => {}, releaseSecond: () => {}, releaseStop: () => {}, releaseError: () => {}, releaseReconcile: () => {}, releaseLayout: () => {}, failSave: !!options.failSave, failExit: !!options.failExit, failStop: false, keepActiveAfterStop: false, stopFailureInactive: false, holdPrepare: false, releasePrepare: () => {},
       emit(info: any) { listeners.get('session-changed')?.({ event: 'session-changed', id: 1, payload: info }); },
       emitOutput(output: any) { listeners.get('terminal-output')?.({ event: 'terminal-output', id: 1, payload: output }); },
     };
@@ -23,6 +23,8 @@ async function workspace(page: Page, options: { sessions?: any[]; holdFirst?: bo
         if (command === 'plugin:event|listen') { listeners.set(args.event, callbacks.get(args.handler)!); return callback; }
         if (command.startsWith('plugin:event|')) return callback;
         if (command === 'get_ui_language') return 'ko';
+        if (['get_codex_settings', 'choose_codex_executable'].includes(command)) return { savedPath: 'D:\\fixture-runtime.exe', resolvedPath: 'D:\\fixture-runtime.exe', source: 'saved', error: null };
+        if (command === 'prepare_runtime') { if (fixture.holdPrepare) await new Promise<void>(resolve => { fixture.releasePrepare = resolve; }); return null; }
         if (command === 'list_projects') return projects;
         if (command === 'list_sessions') {
           if (options.holdReconcile && fixture.starts === 1) await new Promise<void>(resolve => { fixture.releaseReconcile = resolve; });
@@ -381,6 +383,25 @@ test('재시작 종료 대기 중 앱 종료는 재개를 취소하고 다음 �
   await page.locator('#exit').click(); await page.locator('#confirm-exit').click();
   expect(await calls(page, 'complete_exit')).toEqual([]);
   await page.evaluate(() => (window as any).restoreFixture.releaseStop());
+  await expect.poll(async () => (await calls(page, 'complete_exit')).length).toBe(1);
+  expect(await calls(page, 'start_session')).toEqual([]);
+  expect((await saved(page)).sessions[0]).toMatchObject({ threadId: a.threadId, resumeOnStartup: true });
+});
+
+test('재시작의 공유서버 준비 대기 중 종료도 다음 실행 의도를 보존한다', async ({ page }) => {
+  await workspace(page, { live: true, sessions: [], holdStop: true }); page.on('dialog', dialog => dialog.accept());
+  await page.getByRole('button', { name: '세션 재시작', exact: true }).click();
+  await page.evaluate(() => { (window as any).restoreFixture.holdPrepare = true; });
+  await page.locator('#settings-open').click(); await page.locator('#codex-settings-open').click();
+  await page.locator('#codex-executable-choose').click();
+  await expect.poll(async () => (await calls(page, 'prepare_runtime')).length).toBe(2);
+  await page.locator('#codex-settings-close').click(); await page.locator('#settings-close').click();
+  await page.evaluate(() => (window as any).restoreFixture.releaseStop());
+  await expect.poll(async () => (await calls(page, 'list_sessions')).length).toBe(2);
+  await page.evaluate(() => new Promise(resolve => setTimeout(resolve, 0)));
+  await page.locator('#exit').click(); await page.locator('#confirm-exit').click();
+  expect(await calls(page, 'complete_exit')).toEqual([]);
+  await page.evaluate(() => (window as any).restoreFixture.releasePrepare());
   await expect.poll(async () => (await calls(page, 'complete_exit')).length).toBe(1);
   expect(await calls(page, 'start_session')).toEqual([]);
   expect((await saved(page)).sessions[0]).toMatchObject({ threadId: a.threadId, resumeOnStartup: true });

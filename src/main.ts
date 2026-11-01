@@ -964,7 +964,7 @@ function replacementCurrent(replacement: SessionReplacement) {
 async function start(request: SavedSession, focus = true, replacement?: SessionReplacement) {
   if (exitInProgress) throw new UiError('앱 종료 중에는 세션을 시작할 수 없습니다.', 'Cannot start a session while the app is exiting.');
   if (!workspaceReady) throw new UiError('저장된 작업 공간을 확인하고 있습니다. 잠시 후 다시 시도하세요.', 'The saved workspace is still loading. Try again shortly.');
-  for (const info of sessions.values()) if (info.threadId === request.threadId) exitResumeIntents.delete(info.id);
+  if (!replacement) for (const info of sessions.values()) if (info.threadId === request.threadId) exitResumeIntents.delete(info.id);
   // Select at the user's intent, never when a delayed native start completes.
   const requestedProject = sessionProjectKey(request, importedProjects);
   if (focus && selectedProject && selectedProject !== requestedProject) selectProject(requestedProject);
