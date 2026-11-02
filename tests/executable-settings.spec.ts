@@ -159,7 +159,7 @@ test('앱 서버 자동짝 선택과 수동 선택·취소·저장 실패·자�
   await page.locator('#app-server-executable-reset').click();
   await expect(page.locator('#app-server-executable-path')).toHaveValue('');
   await expect(page.locator('#app-server-executable-resolved')).toHaveText(automaticServerPath);
-  await expect(page.locator('#codex-settings-scope')).toContainText('다음 시작 경로');
+  await expect(page.locator('#codex-settings-scope')).toContainText('선택만 바꿔서는 열린 세션이나 공유 서버를 교체하지 않습니다');
   await page.screenshot({ path: testInfo.outputPath('runtime-pair-settings-ko.png'), fullPage: true });
   await page.setViewportSize({ width: 800, height: 540 });
   await page.locator('#app-server-executable-choose').scrollIntoViewIfNeeded();

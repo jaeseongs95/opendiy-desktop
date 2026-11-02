@@ -32,8 +32,8 @@ export function createExecutableSettings(call: <T>(command: string, args?: Recor
     <h3 id="app-server-heading">앱 서버</h3>
     <label for="app-server-executable-path">직접 지정한 서버 파일</label>
     <input id="app-server-executable-path" readonly placeholder="CLI에 맞춰 자동 선택"/>
-    <dl class="executable-details"><dt id="app-server-resolved-label">다음 시작 경로</dt><dd id="app-server-executable-resolved"></dd><dt id="app-server-source-label">선택 방식</dt><dd id="app-server-executable-source"></dd><dt id="app-server-kind-label">실행 방식</dt><dd id="app-server-executable-kind"></dd></dl>
-    <p id="app-server-discovery">자동 선택은 CLI와 같은 폴더의 짝 서버를 먼저 찾고, 없으면 선택한 CLI의 app-server 명령을 사용합니다.</p>
+    <dl class="executable-details"><dt id="app-server-resolved-label">서버 후보 경로</dt><dd id="app-server-executable-resolved"></dd><dt id="app-server-source-label">선택 방식</dt><dd id="app-server-executable-source"></dd><dt id="app-server-kind-label">파일 형식</dt><dd id="app-server-executable-kind"></dd></dl>
+    <p id="app-server-discovery">자동 선택은 CLI와 같은 폴더의 짝 서버를 먼저 찾고, 없으면 CLI 내장 서버를 후보로 선택합니다.</p>
     <div class="dialog-actions"><button id="app-server-executable-reset" class="quiet-button">서버 자동 선택</button><button id="app-server-executable-choose" class="primary-button">서버 파일 선택…</button></div>
     <p class="executable-help"><span id="codex-settings-scope">새 세션과 세션 조회부터 적용됩니다. 이미 열린 세션은 계속 유지됩니다.</span><br><span id="codex-settings-discovery">자동 찾기는 환경변수, PATH 순서로 실행 파일을 찾습니다.</span></p>
     <div id="codex-settings-status" role="status" aria-live="polite"></div>
@@ -66,16 +66,16 @@ export function createExecutableSettings(call: <T>(command: string, args?: Recor
     ['#codex-cli-heading', 'Codex CLI', 'Codex CLI'],
     ['#app-server-heading', '앱 서버', 'App server'],
     ['label[for="app-server-executable-path"]', '직접 지정한 서버 파일', 'Selected server file'],
-    ['#app-server-resolved-label', '다음 시작 경로', 'Next-start path'],
+    ['#app-server-resolved-label', '서버 후보 경로', 'Server candidate path'],
     ['#app-server-source-label', '선택 방식', 'Selection source'],
-    ['#app-server-kind-label', '실행 방식', 'Launch method'],
-    ['#app-server-discovery', '자동 선택은 CLI와 같은 폴더의 짝 서버를 먼저 찾고, 없으면 선택한 CLI의 app-server 명령을 사용합니다.', 'Automatic selection first looks for a matching server beside the CLI, then uses the selected CLI’s app-server command if none is found.'],
+    ['#app-server-kind-label', '파일 형식', 'File type'],
+    ['#app-server-discovery', '자동 선택은 CLI와 같은 폴더의 짝 서버를 먼저 찾고, 없으면 CLI 내장 서버를 후보로 선택합니다.', 'Automatic selection first finds a matching server beside the CLI, then selects the CLI’s built-in server as the candidate if none is found.'],
     ['#app-server-executable-reset', '서버 자동 선택', 'Use automatic server'],
     ['#app-server-executable-choose', '서버 파일 선택…', 'Choose server executable…'],
     ['label[for="codex-executable-path"]', '직접 지정한 파일', 'Selected file'],
     ['#codex-executable-resolved-label', '선택된 CLI 경로', 'Selected CLI path'],
     ['#codex-executable-source-label', '찾은 위치', 'Source'],
-    ['#codex-settings-scope', '새 세션과 세션 조회부터 적용됩니다. 이미 열린 세션과 실행 중인 서버는 바뀌지 않습니다. 다음 시작 경로는 현재 실행 중인 서버 경로가 아닙니다.', 'Applies to new sessions and session browsing. Existing sessions and running servers remain unchanged. The next-start path is not the currently running server path.'],
+    ['#codex-settings-scope', '선택한 서버는 버전 확인과 패키지 전환에 사용합니다. 선택만 바꿔서는 열린 세션이나 공유 서버를 교체하지 않습니다. 실제 실행 버전은 아래 서버 버전 확인에서 확인하세요.', 'The server candidate is used for version checks and package transitions. Changing the selection alone does not replace open sessions or the shared server. Check the actual running version below.'],
     ['#codex-settings-discovery', '자동 찾기는 환경변수, PATH 순서로 실행 파일을 찾습니다.', 'Automatic discovery checks the environment variable, then PATH.'],
     ['#codex-executable-reset', '자동 찾기로 변경', 'Use automatic discovery'],
     ['#codex-executable-choose', '실행 파일 선택…', 'Choose executable…'],

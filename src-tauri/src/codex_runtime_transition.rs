@@ -164,6 +164,14 @@ fn preview_commands(exe: &OsString, server: &OsString, kind: &str, pair: Runtime
             || (report.pair.state == "stopped" && report.pair.running_version.is_some()) || report.pair.socket_path.is_none() {
             return Err("현재 관리·실행 서버의 상태를 확인하지 못해 전환을 준비할 수 없습니다.".into());
         }
+        // Check this cheap prerequisite before reading/hashing large executables.
+        // Unsupported CLIs must report the missing capability, not a hash timeout.
+        let help = query(&["app-server", "daemon", "update", "--help"], deadline)?;
+        checkpoint(cancelled, deadline)?;
+        bind(&mut hash, &help);
+        if !supports_safe_update(&help)? {
+            return Err("선택한 CLI는 작업을 강제로 종료하지 않는 서버 전환을 지원하지 않습니다. 새 전체 패키지를 선택하세요.".into());
+        }
         let evidence = package()?;
         checkpoint(cancelled, deadline)?;
         for path in [&evidence.root, &evidence.cli, &evidence.server] {
@@ -173,12 +181,6 @@ fn preview_commands(exe: &OsString, server: &OsString, kind: &str, pair: Runtime
         bind(&mut hash, &evidence.cli_hash);
         bind(&mut hash, &evidence.server_hash);
         report.package_root = Some(evidence.root.to_str().ok_or("패키지 폴더가 올바른 문자열이 아닙니다.")?.to_owned());
-        let help = query(&["app-server", "daemon", "update", "--help"], deadline)?;
-        checkpoint(cancelled, deadline)?;
-        bind(&mut hash, &help);
-        if !supports_safe_update(&help)? {
-            return Err("선택한 CLI는 작업을 강제로 종료하지 않는 서버 전환을 지원하지 않습니다. 새 전체 패키지를 선택하세요.".into());
-        }
         report.can_apply = true;
         // 이 preview는 전체 패키지 무결성을 인증하지 않는다. 트리 검증은 CLI 책임이다.
         report.reason = Some("확인 후 작업을 강제로 종료하지 않고 서버를 전환합니다. 종료 요청 후에는 취소할 수 없으며 응답이 끊겨도 서버가 나중에 종료될 수 있습니다.".into());
@@ -293,7 +295,7 @@ mod tests {
     }
 
     #[test]
-    fn unknown_pair_or_missing_package_never_queries_mutation_or_help() {
+    fn unknown_pair_skips_help_and_unsupported_update_skips_package_reads() {
         let cancelled = Arc::new(AtomicBool::new(false));
         let mut unknown = pair(); unknown.state = "unavailable".into();
         let report = preview_commands(&OsString::from("cli"), &OsString::from("server"), "standalone", unknown,
@@ -301,8 +303,13 @@ mod tests {
             |_, _| panic!("unknown pair 명령 금지")).unwrap();
         assert!(!report.can_apply);
         let report = preview_commands(&OsString::from("cli"), &OsString::from("server"), "standalone", pair(),
+            &cancelled, Instant::now() + Duration::from_secs(20), || panic!("미지원 CLI의 큰 실행 파일 읽기 금지"),
+            |args, _| { assert_eq!(args, ["app-server", "daemon", "update", "--help"]); Ok(help_without("      --no-force\n")) }).unwrap();
+        assert!(!report.can_apply);
+        assert!(report.reason.unwrap().contains("지원하지 않습니다"));
+        let report = preview_commands(&OsString::from("cli"), &OsString::from("server"), "standalone", pair(),
             &cancelled, Instant::now() + Duration::from_secs(20), || Err("완전한 패키지가 아님".into()),
-            |_, _| panic!("패키지 부재 뒤 명령 금지")).unwrap();
+            |args, _| { assert_eq!(args, ["app-server", "daemon", "update", "--help"]); Ok(help()) }).unwrap();
         assert!(!report.can_apply);
         assert_eq!(report.reason.as_deref(), Some("완전한 패키지가 아님"));
     }
