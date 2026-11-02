@@ -106,11 +106,31 @@ async fn runtime_compatibility(engine: State<'_, Engine>) -> Result<codex::Runti
     let engine = engine.inner().clone();
     tauri::async_runtime::spawn_blocking(move || engine.runtime_compatibility()).await.map_err(|e| format!("호환성 조회 작업자: {e}"))?
 }
+#[tauri::command]
+async fn runtime_pair_status(engine: State<'_, Engine>) -> Result<codex::RuntimePairStatus, String> {
+    let engine = engine.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || engine.runtime_pair_status()).await.map_err(|e| format!("Runtime pair query worker: {e}"))?
+}
+#[tauri::command]
+async fn runtime_transition_preview(engine: State<'_, Engine>) -> Result<codex::RuntimeTransitionPreview, String> {
+    let engine = engine.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || engine.runtime_transition_preview()).await.map_err(|e| format!("Runtime transition preview worker: {e}"))?
+}
+#[tauri::command]
+async fn apply_runtime_transition(engine: State<'_, Engine>, confirmed: bool, fingerprint: String) -> Result<codex::RuntimeTransitionReply, String> {
+    let engine = engine.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || engine.apply_runtime_transition(confirmed, &fingerprint)).await.map_err(|e| format!("Runtime transition worker: {e}"))?
+}
 
 #[tauri::command]
 async fn set_codex_executable(engine: State<'_, Engine>, path: Option<String>) -> Result<codex_settings::CodexSettings, String> {
     let engine = engine.inner().clone();
     tauri::async_runtime::spawn_blocking(move || engine.set_codex_executable(path.as_deref())).await.map_err(|e| format!("Save executable setting worker: {e}"))?
+}
+#[tauri::command]
+async fn set_app_server_executable(engine: State<'_, Engine>, path: Option<String>) -> Result<codex_settings::CodexSettings, String> {
+    let engine = engine.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || engine.set_app_server_executable(path.as_deref())).await.map_err(|e| format!("Save app server setting worker: {e}"))?
 }
 #[tauri::command]
 async fn choose_codex_executable(app: tauri::AppHandle, engine: State<'_, Engine>, picker: State<'_, executable_picker::ExecutablePicker>, ui: State<'_, UiSettings>) -> Result<Option<codex_settings::CodexSettings>, String> {
@@ -123,6 +143,18 @@ async fn choose_codex_executable(app: tauri::AppHandle, engine: State<'_, Engine
     let owner = { let _ = app; 0 };
     tauri::async_runtime::spawn_blocking(move || picker.choose(owner, language)?.map(|path| engine.set_codex_executable(Some(&path))).transpose())
         .await.map_err(|e| format!("Executable chooser worker: {e}"))?
+}
+#[tauri::command]
+async fn choose_app_server_executable(app: tauri::AppHandle, engine: State<'_, Engine>, picker: State<'_, executable_picker::ExecutablePicker>, ui: State<'_, UiSettings>) -> Result<Option<codex_settings::CodexSettings>, String> {
+    let engine = engine.inner().clone();
+    let picker = picker.inner().clone();
+    let language = if ui.english.load(Ordering::Acquire) { ui_language::UiLanguage::En } else { ui_language::UiLanguage::Ko };
+    #[cfg(windows)]
+    let owner = app.get_webview_window("main").ok_or("Main window is unavailable")?.hwnd().map_err(|e| format!("Get app server chooser parent window: {e}"))?.0 as isize;
+    #[cfg(not(windows))]
+    let owner = { let _ = app; 0 };
+    tauri::async_runtime::spawn_blocking(move || picker.choose_server(owner, language)?.map(|path| engine.set_app_server_executable(Some(&path))).transpose())
+        .await.map_err(|e| format!("App server chooser worker: {e}"))?
 }
 #[tauri::command]
 async fn list_projects(engine: State<'_, Engine>) -> Result<Vec<project::ProjectInfo>, String> {
@@ -352,7 +384,7 @@ pub fn run() {
             tray.build(app)?;
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![get_ui_language, set_ui_language, prepare_runtime, start_session, list_sessions, session_write, session_resize, session_stop, session_output_ack, load_layout, save_layout, list_external, list_projects, import_project, create_project, rename_project, set_project_favorite, reorder_project, delete_project, move_session_to_project, choose_project_folder, choose_project, catalog_list, catalog_preview, get_codex_settings, runtime_compatibility, set_codex_executable, choose_codex_executable, extensions_list, extensions_mutate, choose_skill_folder, mobile_control, cron_request, subagents_request, conversation_request, list_pending_questions, respond_pending_question, choose_conversation_attachments, conversation_attachment_storage, stage_conversation_image, cleanup_conversation_attachment, weekly_usage, unconfirmed_exit_available, complete_exit])
+        .invoke_handler(tauri::generate_handler![get_ui_language, set_ui_language, prepare_runtime, start_session, list_sessions, session_write, session_resize, session_stop, session_output_ack, load_layout, save_layout, list_external, list_projects, import_project, create_project, rename_project, set_project_favorite, reorder_project, delete_project, move_session_to_project, choose_project_folder, choose_project, catalog_list, catalog_preview, get_codex_settings, runtime_compatibility, runtime_pair_status, runtime_transition_preview, apply_runtime_transition, set_codex_executable, choose_codex_executable, set_app_server_executable, choose_app_server_executable, extensions_list, extensions_mutate, choose_skill_folder, mobile_control, cron_request, subagents_request, conversation_request, list_pending_questions, respond_pending_question, choose_conversation_attachments, conversation_attachment_storage, stage_conversation_image, cleanup_conversation_attachment, weekly_usage, unconfirmed_exit_available, complete_exit])
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                 if !window.state::<ExitState>().0.load(Ordering::Acquire) {

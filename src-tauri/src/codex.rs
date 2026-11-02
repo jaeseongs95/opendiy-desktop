@@ -51,6 +51,26 @@ mod runtime;
 pub use runtime::RuntimeCompatibility;
 pub(crate) use runtime::inspect as inspect_runtime;
 
+#[path = "codex_runtime_pair.rs"]
+mod runtime_pair;
+pub use runtime_pair::RuntimePairStatus;
+pub(crate) use runtime_pair::inspect as inspect_runtime_pair;
+
+#[path = "codex_runtime_transition.rs"]
+mod runtime_transition;
+pub use runtime_transition::{RuntimeTransitionPreview, RuntimeTransitionReply};
+pub(crate) use runtime_transition::preview as preview_runtime_transition;
+
+pub(crate) fn apply_runtime_transition(exe: &OsString, cancelled: &Arc<AtomicBool>) -> Result<RuntimeTransitionReply, String> {
+    let cwd = env::current_dir().map_err(|e| format!("서버 전환 폴더를 확인할 수 없습니다: {e}"))?;
+    let output = extensions::transition_daemon_output_until(exe, &cwd, Instant::now() + Duration::from_secs(300), cancelled);
+    let unknown = || RuntimeTransitionReply { status: "operationOutcomeUnknown".into(), success: false, outcome: "unknown".into(), message: Some("서버 전환 결과를 확인하지 못했습니다. 종료 요청이 나중에 완료될 수 있습니다. 자동으로 다시 시도하지 말고 현재 버전을 확인하세요.".into()) };
+    let output = match output { Ok(output) => output, Err(_) => return Ok(unknown()) };
+    let reply = match runtime_transition::parse_update_output(&output.stdout) { Ok(reply) => reply, Err(_) => return Ok(unknown()) };
+    if !output.status.success() && reply.success { return Ok(unknown()); }
+    Ok(reply)
+}
+
 #[path = "codex_conversation.rs"]
 mod conversation;
 pub use conversation::{ConversationConnection, ConversationRequest, SubagentRequest};

@@ -11,7 +11,7 @@ async function openSettings(page: Page, hold = false) {
       if(command === 'set_ui_language') return {};
       if(command === 'load_layout') return {version:1,columns:2,sessions:[]};
       if(command === 'list_projects' || command === 'list_sessions') return [];
-      if(command === 'get_codex_settings') return {savedPath:null,resolvedPath:'D:\\tools\\codex.exe',source:'path',error:null};
+      if(command === 'get_codex_settings') return {savedPath:null,resolvedPath:'D:\\tools\\codex.exe',source:'path',error:null,appServer:{savedPath:null,resolvedPath:'D:\\next\\codex-server.exe',source:'sibling',error:null,kind:'standalone'}};
       if(command === 'runtime_compatibility') { if(hold) await new Promise<void>(resolve => {fixture.release=resolve;}); return fixture.reply; }
       return null;
     }};

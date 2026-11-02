@@ -54,6 +54,7 @@ let initialization: Promise<void> = Promise.resolve();
 let runtimePreparation: Promise<void> | undefined;
 let runtimeRestoration: Promise<void> | undefined;
 let runtimeReady = !native;
+let runtimeTransitionBlocked = false;
 let runtimeGeneration = 0;
 let runtimeCommand: Promise<void> | undefined;
 let runtimeCommandGeneration = 0;
@@ -104,7 +105,7 @@ $('#app').innerHTML = `
     <header class="topbar"><div class="workspace-actions"><button id="catalog-open" class="quiet-button">세션 불러오기</button><button id="new-session" class="primary-button"><span>+</span> 새 세션</button></div><div class="top-actions"><span id="mode-label" class="mode-label">LOCAL WORKSPACE</span><button id="notifications" class="icon-button" aria-label="질문함">?<span id="notification-count" hidden></span></button><button id="settings-open" class="icon-button" aria-label="설정 열기" aria-haspopup="dialog" aria-controls="settings-dialog" title="설정">⚙</button><button id="exit" class="quiet-button">앱 종료</button></div></header>
     <div id="project-tabs" class="project-tabs" role="tablist" aria-label="프로젝트별 세션"></div>
     <section class="toolbar" aria-label="그리드 도구"><div class="session-summary"><span class="connection-dot"></span><strong id="running-count">0</strong> 실행 중 <span class="divider"></span><span id="total-count">0개 세션</span></div><div class="layout-tools"><button id="search-toggle" class="quiet-button" title="활성 터미널 검색 (Ctrl+Shift+F)">⌕ <span>검색</span></button><span class="divider"></span><span class="layout-label">열</span><div id="column-options" class="segmented" role="group" aria-label="그리드 열 수"><button data-columns="1" aria-label="1열">▯</button><button data-columns="2" class="active" aria-label="2열">▥</button><button data-columns="3" aria-label="3열">▥▯</button><button data-columns="4" aria-label="4열">▥▥</button></div></div></section>
-    <div id="runtime-banner" class="runtime-banner" role="status" hidden><span id="runtime-status"></span> <button id="runtime-retry" class="quiet-button" hidden>다시 시도</button></div>
+    <div id="runtime-banner" class="runtime-banner" role="status" hidden><span id="runtime-status"></span> <button id="runtime-retry" class="quiet-button" hidden>다시 시도</button> <button id="runtime-settings" class="quiet-button" hidden>실행 파일 설정</button></div>
     <div id="restore-banner" class="restore-banner" hidden><span>자동으로 연결하지 못한 저장 세션이 있습니다. 목록에서 다시 연결하거나 제거할 수 있습니다.</span><button id="restore-open" class="quiet-button">저장 세션 보기 →</button></div>
     <section id="search-bar" class="search-bar" hidden><label for="terminal-search">활성 터미널 검색</label><input id="terminal-search" placeholder="검색어 입력"/><button id="search-prev" class="quiet-button" aria-label="이전 검색 결과">↑</button><button id="search-next" class="quiet-button" aria-label="다음 검색 결과">↓</button><span id="search-result" role="status"></span><button id="search-close" class="icon-button" aria-label="검색 닫기">×</button></section>
     <section id="grid-area" class="grid-area" role="tabpanel"><div id="grid" class="terminal-grid"></div><div id="grid-handles"></div><div id="empty" class="empty"><div class="empty-grid">▦</div><h2>다음 작업을 펼쳐 보세요</h2><p>프로젝트 경로를 선택해 첫 세션을 시작하세요.<br>각 세션은 독립된 터미널에서 실행됩니다.</p><button id="empty-add" class="primary-button">+ 첫 세션 만들기</button><small>Alt + 1–9 세션 전환 · Ctrl + Tab 다음 세션</small></div></section>
@@ -199,7 +200,7 @@ const markupLabels: Record<string, [string, string]> = {
   "뒤로 이동": ["뒤로 이동", "Move later"],
   "세션 최대화": ["세션 최대화", "Maximize session"],
   "이 세션 종료": ["이 세션 종료", "Stop this session"],
-  "직접 입력 · IME · 붙여넣기": ["직접 입력 · IME · 붙여넣기", "Direct input · IME · paste"],
+  "Shift+드래그 선택 · Ctrl+C 복사 · Ctrl+V 붙여넣기": ["Shift+드래그 선택 · Ctrl+C 복사 · Ctrl+V 붙여넣기", "Shift+drag select · Ctrl+C copy · Ctrl+V paste"],
 };
 function localizeMarkup(root: Element) {
   const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
@@ -330,13 +331,25 @@ async function call<T>(command: string, args?: Record<string, unknown>): Promise
   return invoke<T>(command, args);
 }
 
+function showRuntimeFailure(error: unknown) {
+  $('#runtime-banner').hidden = false;
+  bindText($('#runtime-status'), `공유서버 준비 실패: ${message(error, 'ko')}`, `Could not prepare the shared server: ${message(error, 'en')}`);
+  const retry = $<HTMLButtonElement>('#runtime-retry');
+  bindText(retry, '다시 시도', 'Retry'); retry.hidden = false; retry.disabled = false;
+  bindText($('#runtime-settings'), '실행 파일 설정', 'Executable settings'); $('#runtime-settings').hidden = false;
+}
 function prepareRuntime(): Promise<void> {
   if (!native || exitInProgress) return Promise.resolve();
+  if (runtimeTransitionBlocked) {
+    const error = new UiError('서버 전환 결과를 먼저 확인하세요. 자동으로 다시 연결하거나 전환하지 않았습니다.', 'Check the server transition result first. No automatic reconnection or transition was attempted.');
+    showRuntimeFailure(error); return Promise.reject(error);
+  }
   if (runtimePreparation) return runtimePreparation;
   const generation = runtimeGeneration;
   const mutation = executableMutation;
   $('#runtime-banner').hidden = false;
   const retry = $<HTMLButtonElement>('#runtime-retry'); retry.hidden = true; retry.disabled = true;
+  $('#runtime-settings').hidden = true;
   bindText($('#runtime-status'), '공유서버를 준비하는 중… 준비되면 이전 세션을 복원합니다.', 'Preparing the shared server… Saved sessions will resume when it is ready.');
   const operation = Promise.resolve().then(async () => {
     // A settings command can save its selection before its IPC response arrives.
@@ -357,8 +370,7 @@ function prepareRuntime(): Promise<void> {
     weeklyUsage.setVisible(nativeWindowVisible);
   }, error => {
     if (generation !== runtimeGeneration) return prepareRuntime();
-    bindText($('#runtime-status'), `공유서버 준비 실패: ${message(error, 'ko')}`, `Could not prepare the shared server: ${message(error, 'en')}`);
-    bindText(retry, '다시 시도', 'Retry'); retry.hidden = false; retry.disabled = false;
+    showRuntimeFailure(error);
     throw error;
   });
   return runtimePreparation;
@@ -386,6 +398,7 @@ function resumeWorkspace(): Promise<void> {
 }
 $('#runtime-retry').onclick = () => {
   if (exitInProgress || runtimeRestoration) return;
+  runtimeTransitionBlocked = false;
   runtimePreparation = undefined;
   weeklyUsage.refresh();
   void resumeWorkspace().catch(error => notifyError('공유서버 준비 실패', 'Could not prepare the shared server', error));
@@ -482,7 +495,7 @@ function refreshInputState(id: string) {
   const paused = String(view.input.paused);
   if (view.card.dataset.inputPaused !== paused) {
     view.card.dataset.inputPaused = paused;
-    bindText(view.card.querySelector('.terminal-hint')!, view.input.paused ? '입력 전송 대기 중 · 완료되면 입력이 재개됩니다' : '직접 입력 · IME · 붙여넣기', view.input.paused ? 'Input paused until pending writes finish' : 'Direct input · IME · paste');
+    bindText(view.card.querySelector('.terminal-hint')!, view.input.paused ? '입력 전송 대기 중 · 완료되면 입력이 재개됩니다' : 'Shift+드래그 선택 · Ctrl+C 복사 · Ctrl+V 붙여넣기', view.input.paused ? 'Input paused until pending writes finish' : 'Shift+drag select · Ctrl+C copy · Ctrl+V paste');
   }
   if (!view.input.size) view.inputWarning = false;
 }
@@ -569,7 +582,7 @@ function mountConversation(session: Session) {
 
 function createTerminal(session: Session) {
   const card = document.createElement('article'); card.className = 'terminal-card'; card.dataset.id = session.id;
-  card.innerHTML = `<header class="terminal-header"><span class="drag-handle" draggable="true" title="드래그로 순서 변경" aria-hidden="true">⠿</span><span class="terminal-title"></span><span class="session-compaction" role="status" hidden></span><span class="session-state"></span><div class="card-actions"><button class="session-id-copy icon-button" type="button" disabled><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="8" y="8" width="12" height="13" rx="2"/><path d="M16 8V5a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h3"/></svg></button><span class="context-controls"></span><button class="subagents-open icon-button" type="button" aria-haspopup="dialog" aria-controls="subagents-dialog"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="5" r="3"/><circle cx="5" cy="19" r="3"/><circle cx="19" cy="19" r="3"/><path d="M12 8v4M5 16v-4h14v4"/></svg></button><button class="cron-open icon-button" type="button" aria-haspopup="dialog" aria-controls="cron-dialog"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 6v6l4 2"/></svg></button><button class="move-left icon-button" aria-label="앞으로 이동" title="앞으로 이동">‹</button><button class="move-right icon-button" aria-label="뒤로 이동" title="뒤로 이동">›</button><button class="conversation-toggle icon-button" type="button" aria-label="대화 보기" title="대화 / 터미널">☷</button><button class="maximize icon-button" aria-label="세션 최대화" title="세션 최대화">⛶</button><button class="session-restart icon-button" type="button"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 7v5h-5M20 12a8 8 0 1 0-2.3 5.7"/></svg></button><button class="stop icon-button" aria-label="이 세션 종료" title="이 세션 종료">×</button></div></header><div class="terminal-path"></div><div class="terminal-host"></div><div class="terminal-footer"><span class="terminal-identity"></span><span class="terminal-hint">직접 입력 · IME · 붙여넣기</span></div>`;
+  card.innerHTML = `<header class="terminal-header"><span class="drag-handle" draggable="true" title="드래그로 순서 변경" aria-hidden="true">⠿</span><span class="terminal-title"></span><span class="session-compaction" role="status" hidden></span><span class="session-state"></span><div class="card-actions"><button class="session-id-copy icon-button" type="button" disabled><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="8" y="8" width="12" height="13" rx="2"/><path d="M16 8V5a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h3"/></svg></button><span class="context-controls"></span><button class="subagents-open icon-button" type="button" aria-haspopup="dialog" aria-controls="subagents-dialog"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="5" r="3"/><circle cx="5" cy="19" r="3"/><circle cx="19" cy="19" r="3"/><path d="M12 8v4M5 16v-4h14v4"/></svg></button><button class="cron-open icon-button" type="button" aria-haspopup="dialog" aria-controls="cron-dialog"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 6v6l4 2"/></svg></button><button class="move-left icon-button" aria-label="앞으로 이동" title="앞으로 이동">‹</button><button class="move-right icon-button" aria-label="뒤로 이동" title="뒤로 이동">›</button><button class="conversation-toggle icon-button" type="button" aria-label="대화 보기" title="대화 / 터미널">☷</button><button class="maximize icon-button" aria-label="세션 최대화" title="세션 최대화">⛶</button><button class="session-restart icon-button" type="button"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 7v5h-5M20 12a8 8 0 1 0-2.3 5.7"/></svg></button><button class="stop icon-button" aria-label="이 세션 종료" title="이 세션 종료">×</button></div></header><div class="terminal-path"></div><div class="terminal-host"></div><div class="terminal-footer"><span class="terminal-identity"></span><span class="terminal-hint">Shift+드래그 선택 · Ctrl+C 복사 · Ctrl+V 붙여넣기</span></div>`;
   localizeMarkup(card);
   const terminal = new Terminal({ fontFamily: '"Cascadia Code", "Cascadia Mono", Consolas, monospace', fontSize: 12, lineHeight: 1.45, cursorBlink: true, scrollback: 10000, disableStdin: !native, allowProposedApi: false, theme: { background: '#141820', foreground: '#ced5e3', cursor: '#a5b4fc', selectionBackground: '#3b4567', black: '#212735', red: '#f78b99', green: '#91d6ad', yellow: '#eac184', blue: '#8eaafb', magenta: '#c4a4f3', cyan: '#87cfd9', white: '#e3e8f0' } });
   const fit = new FitAddon(); const search = new SearchAddon(); terminal.loadAddon(fit); terminal.loadAddon(search);
@@ -593,6 +606,13 @@ function createTerminal(session: Session) {
   terminal.onData(data => sendInput(session.id, data));
   terminal.onResize(() => queueResize(session.id));
   terminal.attachCustomKeyEventHandler(event => {
+    // Let the browser dispatch xterm's native copy/paste events, rather than
+    // translating Ctrl+C/Ctrl+V to CLI control characters. Unselected Ctrl+C
+    // still interrupts the CLI; paste keeps xterm's bracketed-paste handling.
+    if (!event.isComposing && event.keyCode !== 229 && event.ctrlKey && !event.altKey && !event.metaKey) {
+      const key = event.key.toLowerCase();
+      if (key === 'v' || (key === 'c' && terminal.hasSelection())) return false;
+    }
     if (event.key === 'Enter' && event.shiftKey && !event.altKey && !event.ctrlKey && !event.metaKey) {
       // Windows 콘솔에서도 줄바꿈으로 해석되는 Alt+Enter를 보낸다.
       // 용량 제한과 세션 세대 검사를 거치는 기존 입력 대기열을 사용한다.
@@ -919,19 +939,31 @@ $('#extensions-open').onclick = () => extensionsManager.open(selectedProjectCwd(
 const attachmentStorage = createAttachmentStorage(call, id => sessions.get(id)?.title);
 $('#attachment-storage-open').onclick = () => attachmentStorage.open();
 const executableSettings = createExecutableSettings(async <T>(command: string, args?: Record<string, unknown>) => {
-  if (!['choose_codex_executable', 'set_codex_executable'].includes(command)) return call<T>(command, args);
+  if (!['choose_codex_executable', 'set_codex_executable', 'choose_app_server_executable', 'set_app_server_executable', 'apply_runtime_transition'].includes(command)) return call<T>(command, args);
+  const transitioning = command === 'apply_runtime_transition';
+  let shouldPrepare = !transitioning;
+  runtimeTransitionBlocked = transitioning;
   runtimeGeneration++; runtimePreparation = undefined; runtimeReady = false;
   weeklyUsage.setVisible(false); weeklyUsage.refresh();
   const mutation = call<T>(command, args); executableMutation = mutation;
-  try { return await mutation; }
+  try {
+    const result = await mutation;
+    if (transitioning) {
+      const reply = result as { success?: boolean; outcome?: string } | null;
+      shouldPrepare = reply?.success === true && reply?.outcome === 'updated';
+      runtimeTransitionBlocked = !shouldPrepare;
+    }
+    return result;
+  }
   finally {
     if (executableMutation === mutation) {
       executableMutation = undefined;
-      if (workspaceReady && !exitInProgress) void prepareRuntime().then(() => resumeWorkspace()).catch(error => notifyError('공유서버 준비 실패', 'Could not prepare the shared server', error));
+      if (shouldPrepare && workspaceReady && !exitInProgress) void prepareRuntime().then(() => resumeWorkspace()).catch(error => notifyError('공유서버 준비 실패', 'Could not prepare the shared server', error));
     }
   }
 });
 $('#codex-settings-open').onclick = () => void executableSettings.open();
+$('#runtime-settings').onclick = () => void executableSettings.open();
 $('#settings-open').onclick = () => $<HTMLDialogElement>('#settings-dialog').showModal();
 for (const button of document.querySelectorAll<HTMLElement>('[data-close]')) button.onclick = () => button.closest('dialog')?.close();
 $('#column-options').onclick = event => { const button = (event.target as HTMLElement).closest<HTMLElement>('[data-columns]'); if (button) { columns = Number(button.dataset.columns); maximized = ''; renderGrid(); scheduleSave(); } };
@@ -1109,7 +1141,7 @@ async function requestExit(allowUnconfirmedRemote = false) {
     // Raw preparation owns the native operation even when no restore is pending.
     // A rejection settles ownership; prepareRuntime retains its distinct failure state.
     const preparing = runtimeCommand && runtimeCommandGeneration === runtimeGeneration ? runtimePreparation : undefined;
-    await Promise.all([extensionsManager.beginExit(), mobileControl.beginExit(), weeklyUsage.beginExit(), questionCenter.beginExit(), cronManager.beginExit(), subagentManager.beginExit(), initialization, runtimeRestoration?.catch(() => {}), Promise.allSettled([runtimeCommand, preparing])]);
+    await Promise.all([extensionsManager.beginExit(), mobileControl.beginExit(), weeklyUsage.beginExit(), questionCenter.beginExit(), cronManager.beginExit(), subagentManager.beginExit(), initialization, runtimeRestoration?.catch(() => {}), Promise.allSettled([runtimeCommand, preparing, executableMutation])]);
     await Promise.allSettled([...startOperations, ...restoringRequests.values(), ...restartingSessions.values()]);
     if (native && !workspaceReady) throw new UiError('저장된 작업 공간을 확인하지 못해 종료 정보를 덮어쓰지 않았습니다.', 'Could not load the saved workspace; exit metadata was not overwritten.');
     bindText(button, '종료 중…', 'Exiting…');

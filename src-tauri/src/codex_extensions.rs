@@ -129,7 +129,25 @@ pub(super) fn command_stdout_until(exe: &OsString, cwd: &Path, args: &[String], 
 pub(super) fn start_daemon_stdout_until(exe: &OsString, cwd: &Path, deadline: Instant, cancelled: Option<&Arc<AtomicBool>>) -> Result<Vec<u8>, String> {
     command_stdout_with_job(exe, cwd, &["app-server".into(), "daemon".into(), "start".into(), "--existing-installation".into()], deadline, cancelled, true)
 }
+pub(super) struct CliCommandOutput {
+    pub status: std::process::ExitStatus,
+    pub stdout: Vec<u8>,
+    pub stderr: Vec<u8>,
+}
+// Only the confirmed, fixed non-forcing transition can launch a replacement
+// managed daemon outside its short-lived launcher job. Queries never use this.
+pub(super) fn transition_daemon_output_until(exe: &OsString, cwd: &Path, deadline: Instant, cancelled: &Arc<AtomicBool>) -> Result<CliCommandOutput, String> {
+    command_output_with_job(exe, cwd, &super::runtime_transition::command_args(), deadline, Some(cancelled), true)
+}
 fn command_stdout_with_job(exe: &OsString, cwd: &Path, args: &[String], deadline: Instant, cancelled: Option<&Arc<AtomicBool>>, daemon_launcher: bool) -> Result<Vec<u8>, String> {
+    let output = command_output_with_job(exe, cwd, args, deadline, cancelled, daemon_launcher)?;
+    if !output.status.success() {
+        let detail = String::from_utf8_lossy(&output.stderr[..output.stderr.len().min(16 * 1024)]);
+        return Err(format!("Codex command exited with {}: {}", output.status, detail.trim()));
+    }
+    Ok(output.stdout)
+}
+fn command_output_with_job(exe: &OsString, cwd: &Path, args: &[String], deadline: Instant, cancelled: Option<&Arc<AtomicBool>>, daemon_launcher: bool) -> Result<CliCommandOutput, String> {
     check_cancelled(cancelled)?;
     if Instant::now() >= deadline { return Err("Codex command timed out; its result is unknown. Refresh before retrying".into()); }
     let (mut command, gate) = LaunchGate::wrap_std(exe.as_os_str())?;
@@ -160,11 +178,7 @@ fn command_stdout_with_job(exe: &OsString, cwd: &Path, args: &[String], deadline
     }).collect();
     let mut output = joined.into_iter().collect::<Result<Vec<_>, String>>()?;
     if overflow.load(Ordering::Acquire) { return Err("Codex command output exceeded 8 MiB; refresh before retrying".into()); }
-    if !status.success() {
-        let detail = String::from_utf8_lossy(&output[1][..output[1].len().min(16 * 1024)]);
-        return Err(format!("Codex command exited with {status}: {}", detail.trim()));
-    }
-    Ok(output.remove(0))
+    Ok(CliCommandOutput { status, stdout: output.remove(0), stderr: output.remove(0) })
 }
 fn cli(exe: &OsString, cwd: &Path, args: &[String], timeout: Duration) -> Result<Value, String> {
     let output = command_stdout(exe, cwd, args, timeout)?;

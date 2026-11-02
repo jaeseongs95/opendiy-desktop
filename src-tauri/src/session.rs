@@ -284,13 +284,15 @@ struct RuntimeSelection {
     generation: u64,
     preparation: u64,
     executable: Option<std::ffi::OsString>,
+    server_executable: Option<std::ffi::OsString>,
+    server_kind: Option<String>,
     ready: bool,
     preparing: bool,
     changing: bool,
 }
 
 #[derive(Clone, Debug)]
-struct RuntimeSnapshot { generation: u64, executable: std::ffi::OsString }
+struct RuntimeSnapshot { generation: u64, executable: std::ffi::OsString, server_executable: std::ffi::OsString, server_kind: String }
 #[derive(Debug)]
 struct PreparedRuntime { selection: RuntimeSnapshot, preparation: u64 }
 
@@ -301,6 +303,13 @@ struct EngineInner {
     exiting: Arc<AtomicBool>,
     attachments: crate::conversation_attachments::ConversationAttachments,
     runtime: Mutex<RuntimeSelection>,
+}
+
+struct RuntimeTransitionPermit(Arc<EngineInner>);
+impl Drop for RuntimeTransitionPermit {
+    fn drop(&mut self) {
+        if let Ok(mut runtime) = self.0.runtime.lock() { runtime.changing = false; runtime.ready = false; }
+    }
 }
 
 #[derive(Clone)]
@@ -368,9 +377,16 @@ impl Engine {
         let weak = Arc::downgrade(&session);
         let on_event = Arc::new(move |event| { if let Some(session) = weak.upgrade() { session.observe(event); } });
         let info = session.info()?;
-        let adapter = match self.runtime_snapshot().and_then(|selected| self.prepare_start_with(selected, &session.stop_requested,
-            |exe| codex::prepare_runtime_with_executable(exe, &session.stop_requested),
-            |exe| codex::prepare_with_cancellation(exe, Path::new(&info.cwd), info.thread_id.as_deref(), on_event, session.stop_requested.clone()))) {
+        let adapter = match self.runtime_snapshot().and_then(|selected| {
+            let server = selected.server_executable.clone();
+            let kind = selected.server_kind.clone();
+            self.prepare_start_with(selected, &session.stop_requested,
+                |exe| Self::prepare_pair(exe, &server, &kind, &session.stop_requested),
+                |exe| {
+                    Self::require_pair(exe, &server, &kind, &session.stop_requested)?;
+                    codex::prepare_with_cancellation(exe, Path::new(&info.cwd), info.thread_id.as_deref(), on_event, session.stop_requested.clone())
+                })
+        }) {
             Ok(adapter) => adapter,
             Err(error) => { session.finish("error")?; return Err(error); }
         };
@@ -637,8 +653,11 @@ impl Engine {
 
     pub fn get_codex_settings(&self) -> Result<crate::codex_settings::CodexSettings, String> {
         // Read one setting snapshot, then release SQLite before filesystem I/O.
-        let saved = self.inner.store.lock().map_err(|_| "metadata store lock poisoned")?.codex_executable()?;
-        Ok(crate::codex_settings::resolve(saved.as_deref()))
+        let (saved, server) = {
+            let store = self.inner.store.lock().map_err(|_| "metadata store lock poisoned")?;
+            (store.codex_executable()?, store.app_server_executable()?)
+        };
+        Ok(crate::codex_settings::resolve_pair(saved.as_deref(), server.as_deref()))
     }
 
     pub fn set_codex_executable(&self, path: Option<&str>) -> Result<crate::codex_settings::CodexSettings, String> {
@@ -648,7 +667,13 @@ impl Engine {
         self.change_runtime_selection_with(|| self.inner.store.lock().map_err(|_| "metadata store lock poisoned")?.set_codex_executable(selected.as_deref()))?;
         // Reset is successful even when its environment/PATH fallback is absent.
         // Return that resolution failure as status, never as a failed save.
-        Ok(crate::codex_settings::resolve(selected.as_deref()))
+        self.get_codex_settings()
+    }
+
+    pub fn set_app_server_executable(&self, path: Option<&str>) -> Result<crate::codex_settings::CodexSettings, String> {
+        let selected = path.map(|path| crate::codex_settings::validate(Path::new(path))).transpose()?;
+        self.change_runtime_selection_with(|| self.inner.store.lock().map_err(|_| "metadata store lock poisoned")?.set_app_server_executable(selected.as_deref()))?;
+        self.get_codex_settings()
     }
 
     fn codex_executable(&self) -> Result<std::ffi::OsString, String> { self.get_codex_settings()?.executable() }
@@ -666,6 +691,8 @@ impl Engine {
         if result.is_ok() {
             runtime.generation += 1;
             runtime.executable = None;
+            runtime.server_executable = None;
+            runtime.server_kind = None;
             runtime.ready = false;
             runtime.preparing = false;
         }
@@ -673,29 +700,41 @@ impl Engine {
         result
     }
 
-    fn runtime_snapshot(&self) -> Result<RuntimeSnapshot, String> { self.runtime_snapshot_with(|| self.codex_executable()) }
+    fn runtime_snapshot(&self) -> Result<RuntimeSnapshot, String> {
+        self.runtime_pair_snapshot_with(|| {
+            let settings = self.get_codex_settings()?;
+            Ok((settings.executable()?, settings.app_server.executable()?, settings.app_server.kind))
+        })
+    }
 
+    #[cfg(test)]
     fn runtime_snapshot_with(&self, resolve: impl FnOnce() -> Result<std::ffi::OsString, String>) -> Result<RuntimeSnapshot, String> {
+        self.runtime_pair_snapshot_with(|| resolve().map(|executable| (executable.clone(), executable, "cli".into())))
+    }
+
+    fn runtime_pair_snapshot_with(&self, resolve: impl FnOnce() -> Result<(std::ffi::OsString, std::ffi::OsString, String), String>) -> Result<RuntimeSnapshot, String> {
         let generation = {
             let runtime = self.inner.runtime.lock().map_err(|_| "실행파일 선택 잠금이 손상되었습니다.")?;
             if runtime.changing { return Err("실행파일 설정을 저장 중입니다. 잠시 후 다시 시도하세요.".into()); }
             runtime.generation
         };
-        let executable = resolve()?;
+        let (executable, server_executable, server_kind) = resolve()?;
         let mut runtime = self.inner.runtime.lock().map_err(|_| "실행파일 선택 잠금이 손상되었습니다.")?;
         if runtime.changing || runtime.generation != generation { return Err("실행파일 선택이 바뀌었습니다. 다시 시도하세요.".into()); }
-        if runtime.executable.as_ref() != Some(&executable) {
+        if runtime.executable.as_ref() != Some(&executable) || runtime.server_executable.as_ref() != Some(&server_executable) || runtime.server_kind.as_ref() != Some(&server_kind) {
             runtime.generation = runtime.generation.checked_add(1).ok_or("실행파일 선택 세대 한도에 도달했습니다.")?;
             runtime.executable = Some(executable.clone());
+            runtime.server_executable = Some(server_executable.clone());
+            runtime.server_kind = Some(server_kind.clone());
             runtime.ready = false;
             runtime.preparing = false;
         }
-        Ok(RuntimeSnapshot { generation: runtime.generation, executable })
+        Ok(RuntimeSnapshot { generation: runtime.generation, executable, server_executable, server_kind })
     }
 
     fn verify_runtime_selection(&self, selected: &RuntimeSnapshot, runtime: &RuntimeSelection, cancelled: &AtomicBool) -> Result<(), String> {
         if self.inner.exiting.load(Ordering::Acquire) || cancelled.load(Ordering::Acquire) { return Err("종료 또는 중단 요청으로 실행파일 준비 결과를 사용하지 않았습니다.".into()); }
-        if runtime.changing || runtime.generation != selected.generation || runtime.executable.as_ref() != Some(&selected.executable) { return Err("실행파일 선택이 바뀌었습니다. 다시 준비하세요.".into()); }
+        if runtime.changing || runtime.generation != selected.generation || runtime.executable.as_ref() != Some(&selected.executable) || runtime.server_executable.as_ref() != Some(&selected.server_executable) || runtime.server_kind.as_ref() != Some(&selected.server_kind) { return Err("CLI 또는 앱 서버 선택이 바뀌었습니다. 다시 준비하세요.".into()); }
         Ok(())
     }
 
@@ -748,7 +787,8 @@ impl Engine {
                 if let Some(control) = control { observed.push(control); }
             }
         }
-        let report = codex::inspect_runtime(&selected.executable, &self.inner.exiting, &observed)?;
+        let mut report = codex::inspect_runtime(&selected.executable, &self.inner.exiting, &observed)?;
+        report.selected_server_executable = Some(selected.server_executable.to_string_lossy().into_owned());
         let runtime = self.inner.runtime.lock().map_err(|_| "실행파일 선택 잠금이 손상되었습니다.")?;
         self.verify_runtime_selection(&selected, &runtime, &self.inner.exiting)?;
         Ok(report)
@@ -756,7 +796,79 @@ impl Engine {
 
     pub fn prepare_runtime(&self) -> Result<(), String> {
         if self.inner.exiting.load(Ordering::Acquire) { return Err("앱이 종료 중이어서 공유 서버를 시작하지 않았습니다.".into()); }
-        self.prepare_selected_runtime_with(self.runtime_snapshot()?, true, &self.inner.exiting, |exe| codex::prepare_runtime_with_executable(exe, &self.inner.exiting)).map(|_| ())
+        let selected = self.runtime_snapshot()?;
+        let server = selected.server_executable.clone();
+        let kind = selected.server_kind.clone();
+        self.prepare_selected_runtime_with(selected, true, &self.inner.exiting, |exe| Self::prepare_pair(exe, &server, &kind, &self.inner.exiting)).map(|_| ())
+    }
+
+    pub fn runtime_pair_status(&self) -> Result<codex::RuntimePairStatus, String> {
+        let selected = self.runtime_snapshot()?;
+        let report = codex::inspect_runtime_pair(&selected.executable, &selected.server_executable, &selected.server_kind, &self.inner.exiting)?;
+        let runtime = self.inner.runtime.lock().map_err(|_| "실행파일 선택 잠금이 손상되었습니다.")?;
+        self.verify_runtime_selection(&selected, &runtime, &self.inner.exiting)?;
+        Ok(report)
+    }
+
+    pub fn runtime_transition_preview(&self) -> Result<codex::RuntimeTransitionPreview, String> {
+        let selected = self.runtime_snapshot()?;
+        let report = codex::preview_runtime_transition(&selected.executable, &selected.server_executable, &selected.server_kind, &self.inner.exiting)?;
+        let runtime = self.inner.runtime.lock().map_err(|_| "실행파일 선택 잠금이 손상되었습니다.")?;
+        self.verify_runtime_selection(&selected, &runtime, &self.inner.exiting)?;
+        Ok(report)
+    }
+
+    pub fn apply_runtime_transition(&self, confirmed: bool, fingerprint: &str) -> Result<codex::RuntimeTransitionReply, String> {
+        if !confirmed { return Err("서버 전환은 앱에서 작업 종료와 연결 변경을 확인한 뒤에만 실행할 수 있습니다.".into()); }
+        let _extensions = codex::extension_admission()?;
+        let selected = self.runtime_snapshot()?;
+        let preview = codex::preview_runtime_transition(&selected.executable, &selected.server_executable, &selected.server_kind, &self.inner.exiting)?;
+        if !preview.can_apply { return Err(preview.reason.unwrap_or_else(|| "이 실행 파일은 안전한 서버 전환을 지원하지 않습니다.".into())); }
+        if preview.fingerprint != fingerprint { return Err("서버 또는 선택한 패키지가 바뀌었습니다. 버전을 다시 확인한 뒤 전환하세요.".into()); }
+        {
+            let mut runtime = self.inner.runtime.lock().map_err(|_| "실행파일 선택 잠금이 손상되었습니다.")?;
+            self.verify_runtime_selection(&selected, &runtime, &self.inner.exiting)?;
+            if runtime.preparing { return Err("서버를 준비하는 중입니다. 준비 결과가 나온 뒤 다시 확인하세요.".into()); }
+            runtime.generation = runtime.generation.checked_add(1).ok_or("실행파일 선택 세대 한도에 도달했습니다.")?;
+            runtime.changing = true; runtime.ready = false;
+        }
+        let _transition = RuntimeTransitionPermit(self.inner.clone());
+        if self.inner.sessions.lock().map_err(|_| "세션 목록 잠금 실패")?.values().any(|session| session.phase.load(Ordering::Acquire) < 3) {
+            return Err("앱에 열린 세션이 있습니다. 작업을 마치고 세션을 정리한 뒤 서버를 전환하세요. 서버를 변경하지 않았습니다.".into());
+        }
+        // No user operation can start after changing=true. Recheck external
+        // package/daemon observations without holding the runtime/store lock.
+        let current = codex::preview_runtime_transition(&selected.executable, &selected.server_executable, &selected.server_kind, &self.inner.exiting)?;
+        if !current.can_apply || current.fingerprint != fingerprint { return Err("확인 중 서버 또는 패키지가 바뀌었습니다. 전환하지 않았습니다. 다시 조회하세요.".into()); }
+        let mut reply = codex::apply_runtime_transition(&selected.executable, &self.inner.exiting)?;
+        if reply.success {
+            match codex::inspect_runtime_pair(&selected.executable, &selected.server_executable, &selected.server_kind, &self.inner.exiting) {
+                Ok(pair) if pair.state == "matched" => {},
+                _ => { reply.success = false; reply.outcome = "unknown".into(); reply.message = Some("전환 명령은 끝났지만 실제 서버 버전을 확인하지 못했습니다. 자동으로 다시 실행하지 말고 현재 버전을 조회하세요.".into()); }
+            }
+        }
+        Ok(reply)
+    }
+
+    fn require_pair(exe: &std::ffi::OsString, server: &std::ffi::OsString, kind: &str, cancelled: &Arc<AtomicBool>) -> Result<(), String> {
+        let report = codex::inspect_runtime_pair(exe, server, kind, cancelled)?;
+        if report.state != "matched" {
+            return Err(Self::pair_error(&report));
+        }
+        Ok(())
+    }
+
+    fn pair_error(report: &codex::RuntimePairStatus) -> String {
+        format!("{}. CLI: {}, 선택 서버: {}, 실행 서버: {}. 실행 파일 설정에서 서버 버전을 확인하세요. 자동 복원과 서버 전환은 수행하지 않았습니다.", report.message.as_deref().unwrap_or("서버 버전을 확인하지 못했습니다"), report.cli_version, report.selected_server_version, report.running_version.as_deref().unwrap_or("미확인"))
+    }
+
+    fn prepare_pair(exe: &std::ffi::OsString, server: &std::ffi::OsString, kind: &str, cancelled: &Arc<AtomicBool>) -> Result<(), String> {
+        let report = codex::inspect_runtime_pair(exe, server, kind, cancelled)?;
+        let can_start_selected = report.state == "stopped" && report.managed_version.as_deref() == Some(report.cli_version.as_str()) && report.cli_version == report.selected_server_version;
+        if report.state != "matched" && !can_start_selected { return Err(Self::pair_error(&report)); }
+        codex::prepare_runtime_with_executable(exe, cancelled)?;
+        // A different client may replace the shared endpoint during preparation.
+        Self::require_pair(exe, server, kind, cancelled)
     }
 
     pub fn catalog_list(&self, request: codex::CatalogQuery) -> Result<codex::CatalogPage, String> {
@@ -1034,6 +1146,30 @@ mod runtime_preparation_tests {
         assert!(engine.inner.runtime.try_lock().is_ok(), "외부 작업 중 선택 잠금이 유지됨");
         assert!(engine.inner.store.try_lock().is_ok(), "외부 작업 중 저장소 잠금이 유지됨");
         assert!(engine.inner.sessions.try_lock().is_ok(), "외부 작업 중 세션 잠금이 유지됨");
+    }
+
+    #[test]
+    fn changing_only_server_path_or_role_invalidates_the_previous_ready_pair() {
+        for (new_server, new_kind) in [("server-b.exe", "standalone"), ("server-a.exe", "cli")] {
+            let engine = engine();
+            let original = engine.runtime_pair_snapshot_with(|| Ok(("cli.exe".into(), "server-a.exe".into(), "standalone".into()))).unwrap();
+            let prepared = engine.prepare_selected_runtime_with(original.clone(), false, &AtomicBool::new(false), |_| Ok(())).unwrap();
+            let changed = engine.runtime_pair_snapshot_with(|| { unlocked(&engine); Ok(("cli.exe".into(), new_server.into(), new_kind.into())) }).unwrap();
+            assert!(changed.generation > original.generation);
+            assert!(!engine.inner.runtime.lock().unwrap().ready);
+            assert!(engine.verify_prepared_runtime(&prepared, &AtomicBool::new(false)).is_err());
+        }
+    }
+
+    #[test]
+    fn transition_requires_confirmation_before_settings_or_process_queries() {
+        let engine = engine();
+        // No executable is configured. Reaching candidate inspection would fail
+        // for a different reason instead of returning the confirmation error.
+        let error = engine.apply_runtime_transition(false, "unused").unwrap_err();
+        assert!(error.contains("확인한 뒤에만"));
+        assert_eq!(engine.inner.runtime.lock().unwrap().generation, 0);
+        assert!(!engine.inner.runtime.lock().unwrap().changing);
     }
 
     #[test]

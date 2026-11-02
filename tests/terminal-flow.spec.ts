@@ -398,3 +398,62 @@ test('terminal replay comparison', async ({ browser }, testInfo) => {
   await writeFile(reportPath, JSON.stringify({ schema: 'terminal-replay-v1', browser: browser.version(), platform: process.platform, scope: 'Chromium synthetic native IPC; real app and xterm; ACK baseline only; no WebView, actual CLI or physical IME claim', results }, null, 2), 'utf8');
   await testInfo.attach('terminal-replay.json', { path: reportPath, contentType: 'application/json' });
 });
+
+// Real xterm selection/keyboard/clipboard; only the native IPC transport is synthetic.
+async function questionTerminal(page: Page, mouseMode: boolean) {
+  await page.route('**/src/main.ts*', async route => {
+    const response = await route.fetch();
+    await route.fulfill({ response, body: (await response.text()) + '\nwindow.__flowTerminals = terminals;\n' });
+  });
+  await workspace(page);
+  return page.evaluate(async mouseMode => {
+    const state = window as any;
+    const terminal = state.__flowTerminals.get('flow-a').terminal;
+    await new Promise<void>(resolve => terminal.write('\x1b[?1049h\x1b[?2004h' + (mouseMode ? '\x1b[?1000h\x1b[?1006h' : '') + '\x1b[HQueued follow-up inputs\r\nQuestion fixture: first line\r\nQuestion fixture: second line', resolve));
+    state.flow.sent = [];
+    const box = terminal.element.querySelector('.xterm-screen').getBoundingClientRect();
+    return { x: box.x, y: box.y, width: box.width / terminal.cols, height: box.height / terminal.rows };
+  }, mouseMode);
+}
+
+for (const mouseMode of [false, true]) {
+  test(`question terminal drag and Ctrl+C copy without interrupting CLI (mouse mode ${mouseMode})`, async ({ page, context }) => {
+    await context.grantPermissions(['clipboard-read', 'clipboard-write']);
+    const cell = await questionTerminal(page, mouseMode);
+    if (mouseMode) await page.keyboard.down('Shift');
+    await page.mouse.move(cell.x + cell.width * .1, cell.y + cell.height * .5);
+    await page.mouse.down();
+    await page.mouse.move(cell.x + cell.width * 28.1, cell.y + cell.height * 1.5, { steps: 8 });
+    await page.mouse.up();
+    if (mouseMode) await page.keyboard.up('Shift');
+    const lineEnding = process.platform === 'win32' ? '\r\n' : '\n';
+    const selectedText = `Queued follow-up inputs${lineEnding}Question fixture: first line`;
+    await expect.poll(() => page.evaluate(() => (window as any).__flowTerminals.get('flow-a').terminal.getSelection())).toBe(selectedText);
+    await page.keyboard.press('Control+c');
+    await expect.poll(() => page.evaluate(() => navigator.clipboard.readText())).toBe(selectedText);
+    expect(await page.evaluate(() => (window as any).flow.sent)).toEqual([]);
+    await page.keyboard.press('Control+Shift+c');
+    expect(await page.evaluate(() => (window as any).flow.sent)).toEqual([]);
+    await page.evaluate(() => (window as any).__flowTerminals.get('flow-a').terminal.clearSelection());
+    await page.keyboard.press('Control+c');
+    await expect.poll(() => page.evaluate(() => (window as any).flow.sent.map((item: any) => item.data))).toEqual(['\x03']);
+  });
+}
+
+test('question terminal Ctrl+V and Ctrl+Shift+V paste Unicode once with bracketed paste and no submit', async ({ page, context }) => {
+  await context.grantPermissions(['clipboard-read', 'clipboard-write']);
+  await questionTerminal(page, true);
+  await page.evaluate(() => navigator.clipboard.writeText('합성 답변 😀\nsecond line'));
+  await page.keyboard.press('Control+v');
+  await expect.poll(() => page.evaluate(() => (window as any).flow.sent.map((item: any) => item.data))).toEqual(['\x1b[200~합성 답변 😀\rsecond line\x1b[201~']);
+  await page.keyboard.press('Control+Shift+v');
+  await expect.poll(() => page.evaluate(() => (window as any).flow.sent.map((item: any) => item.data))).toEqual(Array(2).fill('\x1b[200~합성 답변 😀\rsecond line\x1b[201~'));
+});
+
+test('question terminal keeps CLI mouse clicks and wheel reports outside Shift selection', async ({ page }) => {
+  const cell = await questionTerminal(page, true);
+  await page.mouse.click(cell.x + cell.width * 5.5, cell.y + cell.height * .5);
+  await page.mouse.wheel(0, 100);
+  await expect.poll(() => page.evaluate(() => (window as any).flow.sent.map((item: any) => item.data).slice(0, 3))).toEqual(['\x1b[<0;6;1M', '\x1b[<0;6;1m', '\x1b[<65;6;1M']);
+  expect(await page.evaluate(() => (window as any).__flowTerminals.get('flow-a').terminal.getSelection())).toBe('');
+});

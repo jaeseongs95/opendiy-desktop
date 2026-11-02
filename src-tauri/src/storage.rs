@@ -144,6 +144,19 @@ impl Store {
         }.map(|_| ()).map_err(|e| format!("Save app executable setting: {e}"))
     }
 
+    pub fn app_server_executable(&self) -> Result<Option<String>, String> {
+        self.connection.query_row("SELECT value FROM app_settings WHERE key='app_server_executable'", [], |row| row.get(0))
+            .optional().map_err(|e| format!("Read app server executable setting: {e}"))
+    }
+
+    pub fn set_app_server_executable(&self, path: Option<&str>) -> Result<(), String> {
+        match path {
+            Some(path) => self.connection.execute(
+                "INSERT INTO app_settings(key,value) VALUES('app_server_executable',?1) ON CONFLICT(key) DO UPDATE SET value=excluded.value", [path]),
+            None => self.connection.execute("DELETE FROM app_settings WHERE key='app_server_executable'", []),
+        }.map(|_| ()).map_err(|e| format!("Save app server executable setting: {e}"))
+    }
+
     pub fn import_project(&self, directory: &ProjectDirectory) -> Result<ProjectInfo, String> {
         let transaction = self.project_transaction()?;
         let existing = transaction.query_row("SELECT id,name,cwd,created_at,favorite FROM projects WHERE canonical_cwd=?1", [&directory.identity], project_row)
@@ -617,6 +630,41 @@ mod tests {
             assert_eq!(store.ui_language().unwrap(), UiLanguage::En);
         }
         std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn app_server_setting_survives_reopen_and_reset_preserves_cli_and_other_preferences() {
+        let directory = std::env::temp_dir().join(format!("agent-grid-server-setting-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&directory).unwrap();
+        let database = directory.join("workspace.sqlite3");
+        {
+            let store = Store::open(&database).unwrap();
+            assert!(store.app_server_executable().unwrap().is_none());
+            store.set_codex_executable(Some("C:\\native\\codex.exe")).unwrap();
+            store.set_ui_language(crate::ui_language::UiLanguage::En).unwrap();
+            store.connection.execute("INSERT INTO app_settings(key,value) VALUES('unrelated','keep-me')", []).unwrap();
+            store.set_app_server_executable(Some("C:\\native\\codex-app-server.exe")).unwrap();
+        }
+        {
+            let store = Store::open(&database).unwrap();
+            assert_eq!(store.app_server_executable().unwrap().as_deref(), Some("C:\\native\\codex-app-server.exe"));
+            store.set_app_server_executable(Some("C:\\other\\codex-app-server.exe")).unwrap();
+            assert_eq!(store.app_server_executable().unwrap().as_deref(), Some("C:\\other\\codex-app-server.exe"));
+            store.set_app_server_executable(None).unwrap();
+        }
+        {
+            let store = Store::open(&database).unwrap();
+            assert!(store.app_server_executable().unwrap().is_none());
+            assert_eq!(store.codex_executable().unwrap().as_deref(), Some("C:\\native\\codex.exe"));
+            assert_eq!(store.ui_language().unwrap(), crate::ui_language::UiLanguage::En);
+            let unrelated: String = store.connection.query_row("SELECT value FROM app_settings WHERE key='unrelated'", [], |row| row.get(0)).unwrap();
+            assert_eq!(unrelated, "keep-me");
+        }
+        for file in ["workspace.sqlite3-wal", "workspace.sqlite3-shm", "workspace.sqlite3"] {
+            let path = directory.join(file);
+            if path.exists() { std::fs::remove_file(path).unwrap(); }
+        }
+        std::fs::remove_dir(directory).unwrap();
     }
 
     #[test]
