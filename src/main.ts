@@ -11,6 +11,7 @@ import { MAX_SAVED_WORKSPACE_SESSIONS, MAX_WORKSPACE_SESSIONS, acceptOutput, cho
 import { createSessionBrowser } from './session-browser';
 import { createProjectManager } from './project-manager';
 import { createExecutableSettings } from './executable-settings';
+import { runtimeTransitionSucceeded } from './runtime-transition';
 import { createExtensionsManager } from './extensions';
 import { createMobileControl } from './mobile-control';
 import { createWeeklyUsage } from './weekly-usage';
@@ -949,8 +950,7 @@ const executableSettings = createExecutableSettings(async <T>(command: string, a
   try {
     const result = await mutation;
     if (transitioning) {
-      const reply = result as { success?: boolean; outcome?: string } | null;
-      shouldPrepare = reply?.success === true && reply?.outcome === 'updated';
+      shouldPrepare = runtimeTransitionSucceeded(result);
       runtimeTransitionBlocked = !shouldPrepare;
     }
     return result;

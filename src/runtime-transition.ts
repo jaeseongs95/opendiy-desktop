@@ -10,6 +10,13 @@ type Preview = {
 };
 type Result = { status: string; success: boolean; outcome: 'updated' | 'failed' | 'unknown'; message: string | null };
 
+export function runtimeTransitionSucceeded(value: unknown): boolean {
+  if (!value || typeof value !== 'object') return false;
+  const reply = value as Partial<Result>;
+  return reply.status === 'updated' && reply.success === true && reply.outcome === 'updated'
+    && (reply.message === null || typeof reply.message === 'string' && reply.message.length <= 8192);
+}
+
 export function createRuntimeTransition(call: <T>(command: string, args?: Record<string, unknown>) => Promise<T>, onPendingChange: () => void) {
   const element = document.createElement('section');
   element.className = 'runtime-transition';
@@ -111,7 +118,7 @@ export function createRuntimeTransition(call: <T>(command: string, args?: Record
     execute<Result>('apply', 'apply_runtime_transition', { confirmed: true, fingerprint }, value => {
       preview = undefined;
       if (!value || typeof value.status !== 'string' || typeof value.success !== 'boolean' || !['updated', 'failed', 'unknown'].includes(value.outcome) || !nullableText(value.message)) throw new Error(t('서버 전환 응답을 확인하지 못했습니다.', 'Could not verify the server transition response.'));
-      state = value.success && value.outcome === 'updated' ? 'updated' : !value.success && value.outcome === 'failed' ? 'failed' : 'unknown';
+      state = runtimeTransitionSucceeded(value) ? 'updated' : !value.success && value.outcome === 'failed' ? 'failed' : 'unknown';
       message = value.message ?? '';
     });
   };

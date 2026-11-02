@@ -2,7 +2,7 @@ import { test, expect, type Page } from '@playwright/test';
 
 // Exercise the application-level preparation/restore/exit boundary, independently
 // of the transition component. No native process or shared server is started.
-async function failedStartup(page: Page, result: 'updated' | 'unknown') {
+async function failedStartup(page: Page, result: 'updated' | 'unknown' | 'malformed' | 'wrongStatus') {
   await page.addInitScript(result => {
     const state = window as any; state.isTauri = true;
     let callback = 0;
@@ -27,6 +27,8 @@ async function failedStartup(page: Page, result: 'updated' | 'unknown') {
         if (command === 'apply_runtime_transition') {
           if (!args.confirmed || args.fingerprint !== 'confirmed-pair') throw 'Unconfirmed transition';
           await new Promise<void>(resolve => { fixture.release = resolve; });
+          if (result === 'malformed') return { success: true, outcome: 'updated' };
+          if (result === 'wrongStatus') return { status: 'shutdownTimedOut', success: true, outcome: 'updated', message: null };
           return { status: result === 'updated' ? 'updated' : 'shutdownOutcomeUnknown', success: result === 'updated', outcome: result, message: null };
         }
         if (command === 'start_session') return { ...args.request, id: 'restored', generation: 1, state: 'idle', active: true };
@@ -76,6 +78,15 @@ test('전환 중 종료는 요청 정산을 기다리고 늦은 성공으로 세
   expect(await count(page, 'complete_exit')).toBe(0);
   await page.evaluate(() => (window as any).pairStartup.release());
   await expect.poll(() => count(page, 'complete_exit')).toBe(1);
+  expect(await count(page, 'prepare_runtime')).toBe(1);
+  expect(await count(page, 'start_session')).toBe(0);
+});
+
+for (const result of ['malformed', 'wrongStatus'] as const) test(`불완전하거나 모순된 성공 응답 ${result}은 앱 복원을 열지 않는다`, async ({ page }) => {
+  await failedStartup(page, result);
+  await page.evaluate(() => (window as any).pairStartup.release());
+  await expect(page.locator('.transition-status')).toContainText('미확인');
+  await page.locator('#codex-settings-close').click();
   expect(await count(page, 'prepare_runtime')).toBe(1);
   expect(await count(page, 'start_session')).toBe(0);
 });

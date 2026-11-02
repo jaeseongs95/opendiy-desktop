@@ -1,6 +1,6 @@
 import { test, expect, type Page } from '@playwright/test';
 
-async function settings(page: Page, options: { holdPreview?: boolean; holdApply?: boolean; holdSelection?: boolean; canApply?: boolean; state?: 'matched' | 'mismatch' | 'stopped' | 'unavailable'; outcome?: string; success?: boolean; rejectApply?: boolean; malformed?: boolean } = {}) {
+async function settings(page: Page, options: { holdPreview?: boolean; holdApply?: boolean; holdSelection?: boolean; canApply?: boolean; state?: 'matched' | 'mismatch' | 'stopped' | 'unavailable'; outcome?: string; success?: boolean; status?: string; rejectApply?: boolean; malformed?: boolean } = {}) {
   await page.addInitScript(options => {
     const state = window as any; state.isTauri = true;
     let callback = 0;
@@ -11,7 +11,7 @@ async function settings(page: Page, options: { holdPreview?: boolean; holdApply?
         canApply: options.canApply ?? true, reason: options.canApply === false ? '선택한 R32 CLI는 --no-force를 지원하지 않습니다.' : null,
         fingerprint: 'candidate-A', packageRoot: 'D:\\runtime',
       },
-      result: { status: 'complete', success: options.success ?? true, outcome: options.outcome ?? 'updated', message: null },
+      result: { status: options.status ?? 'updated', success: options.success ?? true, outcome: options.outcome ?? 'updated', message: null },
       settings: { savedPath: null, resolvedPath: 'D:\\runtime\\codex.exe', source: 'path', error: null, appServer: { savedPath: null, resolvedPath: 'D:\\runtime\\codex-app-server.exe', source: 'sibling', error: null, kind: 'standalone' } },
     };
     state.__TAURI_INTERNALS__ = {
@@ -38,7 +38,7 @@ async function settings(page: Page, options: { holdPreview?: boolean; holdApply?
           if (options.holdApply) await new Promise<void>(resolve => { fixture.releaseApply = resolve; });
           if (options.rejectApply) throw new Error('연결 응답을 받지 못했습니다');
           if (options.malformed) return { success: true, outcome: 'updated' };
-          if (fixture.result.success && fixture.result.outcome === 'updated') {
+          if (fixture.result.status === 'updated' && fixture.result.success && fixture.result.outcome === 'updated') {
             fixture.preview.pair.managedVersion = fixture.preview.pair.runningVersion = 'R33-server';
             fixture.preview.pair.state = 'matched';
           }
@@ -116,7 +116,7 @@ test('R32 안전 전환 미지원과 일치·확인 불가 상태는 실행을 �
 for (const options of [
   { success: false, outcome: 'failed' }, { success: false, outcome: 'unknown' },
   { success: false, outcome: 'updated' }, { success: true, outcome: 'unknown' },
-  { rejectApply: true }, { malformed: true },
+  { rejectApply: true }, { malformed: true }, { status: 'shutdownOutcomeUnknown' },
 ]) {
   test(`실패·결과 불명·불완전 응답은 성공으로 표시하거나 자동 재시도하지 않는다 ${JSON.stringify(options)}`, async ({ page }) => {
     await settings(page, options);

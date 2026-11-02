@@ -106,11 +106,15 @@ using System.Threading;
 class Fixture {
  static int Main(string[] args) {
   string root = AppDomain.CurrentDomain.BaseDirectory;
+  if (args.Length == 1 && args[0] == "--version") { Console.Write("codex-cli 1.0.0\n"); return 0; }
   if (args.Length == 1 && args[0] == "--help") {
    Console.Write("Usage: fixture [OPTIONS]\n\nOptions:\n  -h, --help\n          Print help\n"); return 0;
   }
   if (args.Length == 2 && args[0] == "app-server" && args[1] == "--help") {
    Console.Write("Usage: fixture app-server [OPTIONS] [COMMAND]\n\nCommands:\n  daemon  Manage daemon\n  proxy  Relay\n\nOptions:\n  -h, --help\n          Print help\n"); return 0;
+  }
+  if (args.Length == 3 && args[0] == "app-server" && args[1] == "daemon" && args[2] == "--help") {
+   Console.Write("Usage: fixture app-server daemon <COMMAND>\n\nCommands:\n  version  Read version\n\nOptions:\n  -h, --help\n"); return 0;
   }
   if (args.Length == 3 && args[0] == "app-server" && args[1] == "daemon" && args[2] == "version") { Console.Write(File.ReadAllText(Path.Combine(root,"version.json"))); return 0; }
   if (args.Length == 2 && args[0] == "app-server" && args[1] == "proxy") {
@@ -146,7 +150,8 @@ fn shared_reaper_handoff_during_observer_join_reports_unknown_for_stop_and_shutd
     let executable = compile_cli(&root);
     let cwd = root.canonicalize().unwrap();
     fs::write(root.join("socket"), b"synthetic rendezvous").unwrap();
-    fs::write(root.join("version.json"), json!({"status":"running","socketPath":cwd.join("socket"),"appServerVersion":"fixture"}).to_string()).unwrap();
+    fs::write(root.join("version.json"), json!({"status":"running","socketPath":cwd.join("socket"),
+        "cliVersion":"1.0.0","managedCodexPath":executable,"managedCodexVersion":"1.0.0","appServerVersion":"1.0.0"}).to_string()).unwrap();
     let stage = |name: &str| fs::write(root.join("stage"), name).unwrap();
     for shutdown in [false, true] {
         stage(if shutdown {"shutdown 초기화"} else {"stop 초기화"});
